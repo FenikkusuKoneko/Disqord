@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,21 +10,51 @@ namespace Disqord
 {
     internal sealed partial class DiscordClientGateway
     {
-        private readonly (int ShardId, int ShardCount)? _shards;
+        public int? ShardId => _shard?[0];
+
+        private readonly int[] _shard;
         internal UserStatus? _status;
         internal ActivityModel _activity;
+
+        internal void SetStatus(UserStatus status)
+        {
+            switch (status)
+            {
+                case UserStatus.Invisible:
+                case UserStatus.Idle:
+                case UserStatus.DoNotDisturb:
+                case UserStatus.Online:
+                    _status = status;
+                    break;
+
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(status));
+            }
+        }
+
+        internal void SetActivity(LocalActivity activity)
+        {
+            _activity = activity == null
+                ? null
+                : new ActivityModel
+                {
+                    Name = activity.Name,
+                    Url = activity.Url,
+                    Type = activity.Type
+                };
+        }
 
         internal Task SendGuildSyncAsync(IEnumerable<ulong> guildIds)
             => SendAsync(new PayloadModel
             {
-                Op = Opcode.GuildSync,
+                Op = GatewayOperationCode.GuildSync,
                 D = guildIds
             });
 
         internal Task SendRequestOfflineMembersAsync(IEnumerable<ulong> guildIds)
             => SendAsync(new PayloadModel
             {
-                Op = Opcode.RequestGuildMembers,
+                Op = GatewayOperationCode.RequestGuildMembers,
                 D = new RequestOfflineMembersModel
                 {
                     GuildId = guildIds,
@@ -37,7 +67,7 @@ namespace Disqord
         internal Task SendRequestOfflineMembersAsync(ulong guildId)
              => SendAsync(new PayloadModel
              {
-                 Op = Opcode.RequestGuildMembers,
+                 Op = GatewayOperationCode.RequestGuildMembers,
                  D = new RequestOfflineMembersModel
                  {
                      GuildId = guildId,
@@ -50,38 +80,74 @@ namespace Disqord
         internal Task SendResumeAsync()
             => SendAsync(new PayloadModel
             {
-                Op = Opcode.Resume,
+                Op = GatewayOperationCode.Resume,
                 D = new ResumeModel
                 {
-                    Token = _client.Token,
+                    Token = Client.Token,
                     Seq = _lastSequenceNumber,
                     SessionId = _sessionId
                 }
             });
 
-        internal Task SendHeartbeatAsync()
+        internal Task SendHeartbeatAsync(CancellationToken cancellationToken)
             => SendAsync(new PayloadModel
             {
-                Op = Opcode.Heartbeat,
+                Op = GatewayOperationCode.Heartbeat,
                 D = _lastSequenceNumber
-            }, _heartbeatCts.Token);
+            }, cancellationToken);
 
-        internal Task SendIdentifyAsync()
+        internal async Task SendIdentifyAsync()
+        {
+            await _identifyLock.WaitAsync().ConfigureAwait(false);
+            var model = new IdentifyModel
+            {
+                Token = Client.Token,
+                LargeThreshold = 250,
+                Presence = new UpdateStatusModel
+                {
+                    Status = _status,
+                    Game = _activity ?? Optional<ActivityModel>.Empty
+                },
+                Shard = _shard,
+                GuildSubscriptions = true
+            };
+
+            if (Library.Debug.MobileIndicator)
+            {
+                model.Properties.Os = "android";
+                model.Properties.Browser = "Discord Android";
+            }
+
+            await SendAsync(new PayloadModel
+            {
+                Op = GatewayOperationCode.Identify,
+                D = model
+            }).ConfigureAwait(false);
+        }
+
+        internal Task SendVoiceStateUpdateAsync(ulong guildId, ulong? channelId, bool muted, bool deafened)
             => SendAsync(new PayloadModel
             {
-                Op = Opcode.Identify,
-                D = new IdentifyModel
+                Op = GatewayOperationCode.VoiceStateUpdate,
+                D = new VoiceStateModel
                 {
-                    Token = _client.Token,
-                    LargeThreshold = 250,
-                    Presence = new UpdateStatusModel
-                    {
-                        Status = _status,
-                        Game = _activity ?? Optional<ActivityModel>.Empty
-                    },
-                    GuildSubscriptions = true
+                    GuildId = guildId,
+                    ChannelId = channelId,
+                    Mute = muted,
+                    Deaf = deafened
                 }
             });
+
+        internal Task SendPresenceAsync(CancellationToken cancellationToken = default)
+            => SendAsync(new PayloadModel
+            {
+                Op = GatewayOperationCode.StatusUpdate,
+                D = new UpdateStatusModel
+                {
+                    Status = _status,
+                    Game = _activity
+                }
+            }, cancellationToken);
 
         internal Task SendAsync(PayloadModel payload)
             => SendAsync(payload, CancellationToken.None);
@@ -89,9 +155,10 @@ namespace Disqord
         internal async Task SendAsync(PayloadModel payload, CancellationToken cancellationToken)
         {
             var json = Serializer.Serialize(payload);
-#if DEBUG
-            Library.Debug.DumpWriter.WriteLine(Serializer.UTF8.GetString(json.Span));
-#endif
+
+            if (Library.Debug.DumpJson)
+                Library.Debug.DumpWriter.WriteLine(Serializer.UTF8.GetString(json.Span));
+
             await _ws.SendAsync(new WebSocketRequest(json, cancellationToken)).ConfigureAwait(false);
         }
     }

@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
+using Disqord.Collections;
 using Disqord.Models;
 
 namespace Disqord.Rest
@@ -9,7 +9,7 @@ namespace Disqord.Rest
     {
         public Snowflake GuildId { get; }
 
-        public RestDownloadable<RestGuild> Guild { get; }
+        public RestFetchable<RestGuild> Guild { get; }
 
         public string Nick { get; private set; }
 
@@ -32,7 +32,8 @@ namespace Disqord.Rest
         internal RestMember(RestDiscordClient client, Snowflake guildId, MemberModel model) : base(client, model.User)
         {
             GuildId = guildId;
-            Guild = new RestDownloadable<RestGuild>(options => Client.GetGuildAsync(GuildId, options));
+            Guild = RestFetchable.Create(this, (@this, options) =>
+                @this.Client.GetGuildAsync(@this.GuildId, options));
             JoinedAt = model.JoinedAt;
             IsMuted = model.Mute;
             IsDeafened = model.Deaf;
@@ -42,11 +43,13 @@ namespace Disqord.Rest
         internal void Update(MemberModel model)
         {
             Nick = model.Nick.Value;
-            var builder = ImmutableArray.CreateBuilder<Snowflake>();
-            builder.Add(GuildId);
+            var list = new List<Snowflake>(model.Roles.Value.Length)
+            {
+                GuildId
+            };
             for (var i = 0; i < model.Roles.Value.Length; i++)
-                builder.Add(model.Roles.Value[i]);
-            RoleIds = builder.ToImmutable();
+                list.Add(model.Roles.Value[i]);
+            RoleIds = list.ReadOnly();
             BoostedAt = model.PremiumSince.Value;
 
             base.Update(model.User);

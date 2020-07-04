@@ -16,7 +16,7 @@ namespace Disqord
 
         public string Tag => MessageFormat;
 
-        public LocalCustomEmoji(Snowflake id, string name, bool isAnimated)
+        public LocalCustomEmoji(Snowflake id, string name = null, bool isAnimated = false)
         {
             Id = id;
             Name = name;
@@ -24,7 +24,7 @@ namespace Disqord
         }
 
         public string GetUrl(int size = 2048)
-            => Discord.GetCustomEmojiUrl(Id, IsAnimated, size);
+            => Discord.Cdn.GetCustomEmojiUrl(Id, IsAnimated, size);
 
         public bool Equals(IEmoji other)
             => Discord.Comparers.Emoji.Equals(this, other);

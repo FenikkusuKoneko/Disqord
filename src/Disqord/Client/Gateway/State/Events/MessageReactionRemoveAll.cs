@@ -1,8 +1,7 @@
-﻿using System.Collections.Generic;
-using System.Linq;
+﻿using System.Linq;
 using System.Threading.Tasks;
+using Disqord.Collections;
 using Disqord.Events;
-using Disqord.Logging;
 using Disqord.Models;
 using Disqord.Models.Dispatches;
 using Disqord.Rest;
@@ -14,25 +13,19 @@ namespace Disqord
         public Task HandleMessageReactionRemoveAllAsync(PayloadModel payload)
         {
             var model = Serializer.ToObject<MessageReactionRemoveAllModel>(payload.D);
-            var channel = model.GuildId != null
-                ? GetGuildChannel(model.ChannelId) as ICachedMessageChannel
-                : GetPrivateChannel(model.ChannelId);
-
-            if (channel == null)
-            {
-                Log(LogMessageSeverity.Warning, $"Uncached channel in MessageReactionRemoveAll. Id: {model.ChannelId}");
-                return Task.CompletedTask;
-            }
-
+            var channel = GetGuild(model.GuildId).GetTextChannel(model.ChannelId);
             var message = channel.GetMessage(model.MessageId);
             var reactions = message?._reactions.ToDictionary(x => x.Key, x => x.Value);
             message?._reactions.Clear();
 
+            var messageOptional = FetchableSnowflakeOptional.Create<CachedMessage, RestMessage, IMessage>(
+                model.MessageId, message, RestFetchable.Create((this, model), (tuple, options) =>
+                {
+                    var (@this, model) = tuple;
+                    return @this._client.GetMessageAsync(model.ChannelId, model.MessageId, options);
+                }));
             return _client._reactionsCleared.InvokeAsync(new ReactionsClearedEventArgs(
-                channel,
-                new DownloadableOptionalSnowflakeEntity<CachedMessage, RestMessage>(message, model.MessageId,
-                    options => _client.GetMessageAsync(channel.Id, model.MessageId, options)),
-                reactions ?? Optional<IReadOnlyDictionary<IEmoji, ReactionData>>.Empty));
+                channel, messageOptional, reactions?.ReadOnly() ?? ReadOnlyDictionary<IEmoji, ReactionData>.Empty));
         }
     }
 }

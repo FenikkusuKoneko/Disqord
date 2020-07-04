@@ -34,12 +34,15 @@ namespace Disqord
                     && gatewayEvent != GatewayDispatch.GuildSync
                     && gatewayEvent != GatewayDispatch.Ready)
                 {
-                    var tcs = _readyTaskCompletionSource;
-                    if (tcs != null && !tcs.Task.IsCompleted)
+                    lock (_readyPayloadQueue)
                     {
-                        Log(LogMessageSeverity.Debug, $"Queueing up {gatewayEvent.Value}.");
-                        _readyPayloadQueue.Enqueue((payload, gatewayEvent.Value));
-                        return;
+                        var tcs = _readyTaskCompletionSource;
+                        if (tcs != null && !tcs.Task.IsCompleted)
+                        {
+                            Log(LogMessageSeverity.Debug, $"Queueing up {gatewayEvent.Value}.");
+                            _readyPayloadQueue.Enqueue((payload, gatewayEvent.Value));
+                            return;
+                        }
                     }
                 }
             }
@@ -50,6 +53,7 @@ namespace Disqord
             {
                 case GatewayDispatch.Ready:
                 {
+                    _identifyTcs.TrySetResult(true);
                     Log(LogMessageSeverity.Information, "Successfully identified.");
                     var model = Serializer.ToObject<ReadyModel>(payload.D);
                     _sessionId = model.SessionId;
@@ -69,8 +73,8 @@ namespace Disqord
 
                 case GatewayDispatch.Resumed:
                 {
+                    _identifyTcs.TrySetResult(true);
                     Log(LogMessageSeverity.Information, "Resumed.");
-                    _resuming = false;
                     break;
                 }
 
@@ -190,6 +194,18 @@ namespace Disqord
                     return;
                 }
 
+                case GatewayDispatch.InviteCreate:
+                {
+                    await State.HandleInviteCreateAsync(payload).ConfigureAwait(false);
+                    return;
+                }
+
+                case GatewayDispatch.InviteDelete:
+                {
+                    await State.HandleInviteDeleteAsync(payload).ConfigureAwait(false);
+                    return;
+                }
+
                 case GatewayDispatch.MessageAck:
                 {
                     await State.HandleMessageAckAsync(payload).ConfigureAwait(false);
@@ -235,6 +251,12 @@ namespace Disqord
                 case GatewayDispatch.MessageReactionRemoveAll:
                 {
                     await State.HandleMessageReactionRemoveAllAsync(payload).ConfigureAwait(false);
+                    return;
+                }
+
+                case GatewayDispatch.MessageReactionRemoveEmoji:
+                {
+                    await State.HandleMessageReactionRemoveEmojiAsync(payload).ConfigureAwait(false);
                     return;
                 }
 

@@ -14,12 +14,12 @@ namespace Disqord
 
         Task<IReadOnlyList<RestWebhook>> GetWebhooksAsync(RestRequestOptions options = null);
 
-        RestRequestEnumerator<Snowflake> GetBulkMessageDeletionEnumerator(IEnumerable<Snowflake> messageIds);
+        RestRequestEnumerator<Snowflake> GetBulkMessageDeletionEnumerator(IEnumerable<Snowflake> messageIds, RestRequestOptions options = null);
 
         Task DeleteMessagesAsync(IEnumerable<Snowflake> messageIds, RestRequestOptions options = null);
 
         Task RemoveMemberReactionAsync(Snowflake messageId, Snowflake memberId, IEmoji emoji, RestRequestOptions options = null);
 
-        Task ClearReactionsAsync(Snowflake messageId, RestRequestOptions options = null);
+        Task ClearReactionsAsync(Snowflake messageId, IEmoji emoji = null, RestRequestOptions options = null);
     }
 }

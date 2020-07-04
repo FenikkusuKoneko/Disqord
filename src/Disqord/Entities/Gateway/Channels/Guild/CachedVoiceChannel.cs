@@ -8,13 +8,14 @@ namespace Disqord
     {
         public int Bitrate { get; private set; }
 
-        public int UserLimit { get; private set; }
+        public int MemberLimit { get; private set; }
 
-        public IReadOnlyDictionary<Snowflake, CachedMember> Members { get; }
+        public IReadOnlyDictionary<Snowflake, CachedMember> Members
+            => new ReadOnlyValuePredicateArgumentDictionary<Snowflake, CachedMember, Snowflake>(
+                Guild._members, (x, id) => x.VoiceChannel != null && x.VoiceChannel.Id == id, Id);
 
         internal CachedVoiceChannel(CachedGuild guild, ChannelModel model) : base(guild, model)
         {
-            Members = new ReadOnlyValuePredicateDictionary<Snowflake, CachedMember>(guild._members, x => x.VoiceChannel != null && x.VoiceChannel.Id == Id);
             Update(model);
         }
 
@@ -24,7 +25,7 @@ namespace Disqord
                 Bitrate = model.Bitrate.Value;
 
             if (model.UserLimit.HasValue)
-                UserLimit = model.UserLimit.Value;
+                MemberLimit = model.UserLimit.Value;
 
             base.Update(model);
         }

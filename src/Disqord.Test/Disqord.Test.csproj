@@ -1,6 +1,7 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <IsPackable>false</IsPackable>
     <OutputType>Exe</OutputType>
     <VersionPrefix>1.0.0</VersionPrefix>
     <TargetFramework>netcoreapp3.0</TargetFramework>
@@ -16,6 +17,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Disqord.Bot\Disqord.Bot.csproj" />
+    <ProjectReference Include="..\Disqord.Extensions.Interactivity\Disqord.Extensions.Interactivity.csproj" />
     <ProjectReference Include="..\Disqord.Rest\Disqord.Rest.csproj" />
     <ProjectReference Include="..\Disqord.Serialization.Newtonsoft\Disqord.Serialization.Json.Newtonsoft.csproj" />
     <ProjectReference Include="..\Disqord\Disqord.csproj" />

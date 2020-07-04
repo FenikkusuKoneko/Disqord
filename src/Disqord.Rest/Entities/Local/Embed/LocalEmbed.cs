@@ -1,12 +1,14 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
 using System.Linq;
+using Disqord.Collections;
 
 namespace Disqord
 {
     public sealed class LocalEmbed
     {
+        public static LocalEmbed Empty => new LocalEmbedBuilder().Build();
+
         public string Title { get; }
 
         public string Description { get; }
@@ -38,7 +40,7 @@ namespace Disqord
             Color = builder.Color;
             Footer = builder.Footer?.Build();
             Author = builder.Author?.Build();
-            Fields = builder.Fields.Select(x => x.Build()).ToImmutableArray();
+            Fields = builder.Fields.ToReadOnlyList(x => x.Build());
         }
     }
 }

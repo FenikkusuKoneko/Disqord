@@ -1,14 +1,16 @@
-﻿using System;
-using System.Collections.Concurrent;
+using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using Disqord.Client.Gateway;
 using Disqord.Events;
 using Disqord.Logging;
 using Disqord.Models;
 using Disqord.Rest;
 using Disqord.Serialization.Json;
+using Disqord.Sharding;
 using Disqord.WebSocket;
 
 namespace Disqord
@@ -17,10 +19,11 @@ namespace Disqord
     {
         public TimeSpan? Latency => _lastHeartbeatAck - _lastHeartbeatSent;
 
-        internal IJsonSerializer Serializer => _client.Serializer;
-        internal DiscordClientState State => _client.State;
+        internal IJsonSerializer Serializer => State.Serializer;
+        internal DiscordClientBase Client => State._client;
+        internal readonly DiscordClientState State;
 
-        private readonly DiscordClientBase _client;
+        private readonly IdentifyLock _identifyLock;
 
         private bool _isDisposed;
         private DateTimeOffset? _lastGuildCreate;
@@ -28,28 +31,34 @@ namespace Disqord
         private int? _lastSequenceNumber;
         private string _sessionId;
         private string[] _trace;
-        private volatile bool _resuming;
         private volatile bool _reconnecting;
         private TaskCompletionSource<bool> _readyTaskCompletionSource;
-        private CancellationTokenSource _combinedRunCts;
-        private CancellationTokenSource _runCts;
+        private EfficientCancellationTokenSource _combinedRunCts;
+        private EfficientCancellationTokenSource _runCts;
         private TaskCompletionSource<bool> _runTcs;
+        private TaskCompletionSource<bool> _identifyTcs;
         private readonly WebSocketClient _ws;
         private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
 
-        private readonly ConcurrentQueue<(PayloadModel, GatewayDispatch)> _readyPayloadQueue = new ConcurrentQueue<(PayloadModel, GatewayDispatch)>();
+        private readonly Queue<(PayloadModel, GatewayDispatch)> _readyPayloadQueue = new Queue<(PayloadModel, GatewayDispatch)>();
 
-        public DiscordClientGateway(DiscordClientBase client, (int ShardId, int ShardCount)? shards)
+        public DiscordClientGateway(DiscordClientState state, (int ShardId, int ShardCount)? shards)
         {
-            _client = client;
-            _shards = shards;
+            State = state;
+            _identifyLock = new IdentifyLock(this);
+            _shard = shards != null
+                ? new[] { shards.Value.ShardId, shards.Value.ShardCount }
+                : null;
+
             _ws = new WebSocketClient();
             _ws.MessageReceived += WebSocketMessageReceivedAsync;
             _ws.Closed += WebSocketClosedAsync;
         }
 
         internal void Log(LogMessageSeverity severity, string message, Exception exception = null)
-            => _client.Logger.Log(this, new MessageLoggedEventArgs("Gateway", severity, message, exception));
+            => State.Logger.Log(Client, new MessageLoggedEventArgs(_shard != null
+                ? $"Gateway #{_shard[0]}"
+                : "Gateway", severity, message, exception));
 
         public async Task RunAsync(CancellationToken cancellationToken)
         {
@@ -61,10 +70,10 @@ namespace Disqord
                     throw new InvalidOperationException("The gateway is already running.");
 
                 _manualDisconnection = false;
-                _runCts = new CancellationTokenSource();
+                _runCts = new EfficientCancellationTokenSource();
                 _runTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-                _combinedRunCts = CancellationTokenSource.CreateLinkedTokenSource(_runCts.Token, cancellationToken);
-                _combinedRunCts.Token.Register(() => CancelRun(null));
+                _combinedRunCts = EfficientCancellationTokenSource.CreateLinkedTokenSource(_runCts.Token, cancellationToken);
+                _combinedRunCts.Token.Register(x => (x as DiscordClientGateway).CancelRun(null), this);
                 await ConnectAsync().ConfigureAwait(false);
             }
             finally
@@ -85,17 +94,16 @@ namespace Disqord
 
         private async Task ConnectAsync()
         {
-            Log(LogMessageSeverity.Information, "Connecting...");
-            var gatewayUrl = await _client.GetGatewayAsync(_sessionId == null).ConfigureAwait(false);
-            await _ws.ConnectAsync(new Uri(string.Concat(gatewayUrl, "?compress=zlib-stream")), _combinedRunCts.Token).ConfigureAwait(false);
+            if (_sessionId == null)
+                _identifyTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            if (_sessionId != null)
-            {
-                Log(LogMessageSeverity.Information, "Session id is present, attempting to resume...");
-                _resuming = true;
-                await SendResumeAsync().ConfigureAwait(false);
-            }
+            Log(LogMessageSeverity.Information, "Connecting...");
+            var gatewayUrl = await Client.GetGatewayAsync(_sessionId == null).ConfigureAwait(false);
+            await _ws.ConnectAsync(new Uri(string.Concat(gatewayUrl, "?compress=zlib-stream")), _combinedRunCts.Token).ConfigureAwait(false);
         }
+
+        public Task WaitForIdentifyAsync()
+            => _identifyTcs.Task;
 
         private Task DisconnectAsync()
         {
@@ -107,11 +115,7 @@ namespace Disqord
         {
             _manualDisconnection = true;
             _sessionId = null;
-            try
-            {
-                _heartbeatCts?.Cancel();
-            }
-            catch { }
+            _heartbeatCts?.Cancel();
             _heartbeatCts?.Dispose();
             _combinedRunCts?.Dispose();
             _combinedRunCts = null;
@@ -154,7 +158,17 @@ namespace Disqord
 
         private async Task WebSocketMessageReceivedAsync(WebSocketMessageReceivedEventArgs e)
         {
-            var payload = Serializer.Deserialize<PayloadModel>(e.Stream);
+            PayloadModel payload;
+            try
+            {
+                payload = Serializer.Deserialize<PayloadModel>(e.Stream);
+            }
+            catch (Exception ex)
+            {
+                Log(LogMessageSeverity.Critical, $"An exception occurred while trying to deserialize a payload.", ex);
+                return;
+            }
+
             Log(LogMessageSeverity.Debug, $"Received opcode {payload.Op}.");
             try
             {
@@ -170,14 +184,13 @@ namespace Disqord
         {
             try
             {
-                await _semaphore.WaitAsync().ConfigureAwait(false);
-
                 if (_manualDisconnection)
                     return;
 
                 if (_reconnecting)
                     return;
 
+                await _semaphore.WaitAsync().ConfigureAwait(false);
                 _reconnecting = true;
 
                 Log(LogMessageSeverity.Warning, $"Close: {e.Status} {e.Description}", e.Exception);
@@ -204,18 +217,14 @@ namespace Disqord
                         var message = $"Close {gatewayCloseCode} ({(int) gatewayCloseCode}) is unrecoverable, stopping.";
                         Log(LogMessageSeverity.Critical, message);
                         _reconnecting = false;
-                        CancelRun(new Exception(message));
+                        var exception = new Exception(message);
+                        _identifyTcs.TrySetException(exception);
+                        CancelRun(exception);
                         return;
                     }
                 }
 
-                try
-                {
-                    _heartbeatCts?.Cancel();
-                }
-                catch { }
-                _heartbeatCts?.Dispose();
-
+                _heartbeatCts?.Cancel();
                 while (!_combinedRunCts.IsCancellationRequested && !_isDisposed)
                 {
                     try
@@ -241,10 +250,6 @@ namespace Disqord
                     {
                         return;
                     }
-                    catch (TaskCanceledException)
-                    {
-                        return;
-                    }
                     catch (Exception ex)
                     {
                         Log(LogMessageSeverity.Error, $"Failed to reconnect. Retrying in 10 seconds.", ex);
@@ -260,31 +265,47 @@ namespace Disqord
 
         private async Task DelayedInvokeReadyAsync()
         {
-            if (_client.IsBot)
+            // TODO: break out on connection interruption
+            if (Client.IsBot)
             {
-                var last = _lastGuildCreate;
-                while (last == null || (DateTimeOffset.UtcNow - last).Value.TotalSeconds < 2)
-                {
-                    await Task.Delay(last == null ? 2000 : 1000).ConfigureAwait(false);
-                    last = _lastGuildCreate;
-                }
+                DateTimeOffset? lastGuildCreate;
+                var now = DateTimeOffset.UtcNow;
 
-                var batches = State._guilds.Values.Where(x => !x.IsChunked).Batch(75).Select(x => x.ToArray()).ToArray();
-                var tasks = new Task[batches.Length];
-                for (var i = 0; i < batches.Length; i++)
+                // Delay up to ~3 seconds for the first GUILD_CREATE.
+                while ((lastGuildCreate = _lastGuildCreate) == null && (DateTimeOffset.UtcNow - now).TotalSeconds < 3)
+                    await Task.Delay(100).ConfigureAwait(false);
+
+                // If we received a guild continue to receive them
+                // with a ~3.5 seconds window.
+                if (lastGuildCreate != null)
                 {
-                    var batch = batches[i];
-                    for (var j = 0; j < batch.Length; j++)
+                    while ((DateTimeOffset.UtcNow - lastGuildCreate.Value).TotalSeconds < 3.5)
                     {
-                        var guild = batch[j];
-                        Log(LogMessageSeverity.Information, $"Requesting offline members for {guild.Name}. Expecting {guild.ChunksExpected} {(guild.ChunksExpected == 1 ? "chunk" : "chunks")}.");
+                        await Task.Delay(100).ConfigureAwait(false);
+                        lastGuildCreate = _lastGuildCreate;
+
                     }
 
-                    await SendRequestOfflineMembersAsync(batch.Select(x => x.Id.RawValue)).ConfigureAwait(false);
-                    tasks[i] = Task.WhenAll(batch.Select(x => x.ChunkTcs.Task));
-                }
+                    var batches = State._guilds.Values.Where(x => x.Client.GetGateway(x.Id) == this && !x.IsChunked)
+                        .Batch(75)
+                        .Select(x => x.ToArray())
+                        .ToArray();
+                    var tasks = new Task[batches.Length];
+                    for (var i = 0; i < batches.Length; i++)
+                    {
+                        var batch = batches[i];
+                        for (var j = 0; j < batch.Length; j++)
+                        {
+                            var guild = batch[j];
+                            Log(LogMessageSeverity.Information, $"Requesting offline members for {guild.Name}. Expecting {guild.ChunksExpected} {(guild.ChunksExpected == 1 ? "chunk" : "chunks")}.");
+                        }
 
-                await Task.WhenAll(tasks).ConfigureAwait(false);
+                        await SendRequestOfflineMembersAsync(batch.Select(x => x.Id.RawValue)).ConfigureAwait(false);
+                        tasks[i] = Task.WhenAll(batch.Select(x => x.ChunkTcs.Task));
+                    }
+
+                    await Task.WhenAll(tasks).ConfigureAwait(false);
+                }
             }
             else
             {
@@ -293,29 +314,54 @@ namespace Disqord
                 await Task.WhenAll(guilds.Select(x => x.SyncTcs.Task)).ConfigureAwait(false);
             }
 
-            // TODO
-            if (_shards == null)
-                await _client._ready.InvokeAsync(new ReadyEventArgs(_client, _sessionId, _trace)).ConfigureAwait(false);
-
-            while (_readyPayloadQueue.TryDequeue(out var queuedPayload))
+            if (_shard == null)
             {
-                Log(LogMessageSeverity.Debug, $"Firing queued up payload: {queuedPayload.Item2} with S: {queuedPayload.Item1.S}.");
-                await HandleDispatchAsync(queuedPayload.Item1, queuedPayload.Item2).ConfigureAwait(false);
+                await Client._ready.InvokeAsync(new ReadyEventArgs(Client, _sessionId, _trace)).ConfigureAwait(false);
+            }
+            else if (Client is IDiscordSharder sharder)
+            {
+                var shardId = _shard[0];
+                var args = new ShardReadyEventArgs(Client, _sessionId, _trace, sharder.Shards[shardId]);
+                await sharder._shardReady.InvokeAsync(args).ConfigureAwait(false);
+
+                if (shardId == sharder.Shards.Count - 1)
+                    await Client._ready.InvokeAsync(args).ConfigureAwait(false);
             }
 
-            _readyTaskCompletionSource.SetResult(true);
-            _readyTaskCompletionSource = null;
+            while (true)
+            {
+                (PayloadModel, GatewayDispatch) queuedPayload;
+                lock (_readyPayloadQueue)
+                {
+                    var dequeued = _readyPayloadQueue.TryDequeue(out queuedPayload);
+                    if (!dequeued)
+                    {
+                        _readyTaskCompletionSource.SetResult(true);
+                        _readyTaskCompletionSource = null;
+                        break;
+                    }
+                }
+
+                Log(LogMessageSeverity.Debug, $"Firing queued up payload: {queuedPayload.Item2} with S: {queuedPayload.Item1.S}.");
+                try
+                {
+                    await HandleDispatchAsync(queuedPayload.Item1, queuedPayload.Item2).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Log(LogMessageSeverity.Error, $"An exception occurred while handling a queued {queuedPayload.Item1.T} dispatch.\n{queuedPayload.Item1.D}", ex);
+                }
+            }
         }
 
-        public async ValueTask DisposeAsync()
+        public ValueTask DisposeAsync()
         {
-            _isDisposed = true;
+            if (_isDisposed)
+                return default;
 
-            if (!_isDisposed)
-            {
-                CancelRun(null);
-                _ws.Dispose();
-            }
+            _isDisposed = true;
+            CancelRun(null);
+            return _ws.DisposeAsync();
         }
     }
 }

@@ -1,18 +1,13 @@
 ﻿using System;
-using System.Collections.Generic;
+using Disqord.Bot;
 using Qmmands;
 
-namespace Disqord.Bot
+namespace Disqord
 {
-    public sealed class DiscordBotConfiguration : DiscordClientConfiguration
+    public class DiscordBotConfiguration : DiscordClientConfiguration, IDiscordBotBaseConfiguration
     {
-        public CommandService CommandService { get; set; }
-
-        public Func<DiscordBot, IServiceProvider> ProviderFactory { get; set; }
-
-        public IEnumerable<string> Prefixes { get; set; }
-
-        public bool HasMentionPrefix { get; set; } = true;
+        public CommandServiceConfiguration CommandServiceConfiguration { get; set; }
+        public Func<DiscordBotBase, IServiceProvider> ProviderFactory { get; set; }
 
         public static new DiscordBotConfiguration Default => new DiscordBotConfiguration();
     }

@@ -10,9 +10,6 @@ namespace Disqord
         public Task HandleMessageUpdateAsync(PayloadModel payload)
         {
             var model = Serializer.ToObject<MessageModel>(payload.D);
-            if (!model.EditedTimestamp.HasValue)
-                return Task.CompletedTask;
-
             ICachedMessageChannel channel;
             CachedGuild guild = null;
             if (model.GuildId != null)
@@ -79,7 +76,7 @@ namespace Disqord
             }
 
             return _client._messageUpdated.InvokeAsync(new MessageUpdatedEventArgs(channel,
-                new OptionalSnowflakeEntity<CachedUserMessage>(before, model.Id),
+                new SnowflakeOptional<CachedUserMessage>(before, model.Id),
                 message));
         }
     }

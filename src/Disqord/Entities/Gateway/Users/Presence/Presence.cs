@@ -1,9 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
 using System.Linq;
+using Disqord.Collections;
 using Disqord.Models.Dispatches;
-using Qommon.Collections;
 
 namespace Disqord
 {
@@ -12,12 +11,12 @@ namespace Disqord
         public UserStatus Status { get; }
 
         public IReadOnlyDictionary<UserClient, UserStatus> Statuses => _statuses ?? throw new InvalidOperationException("Bots cannot have multiple statuses.");
-        private IReadOnlyDictionary<UserClient, UserStatus> _statuses;
+        private readonly IReadOnlyDictionary<UserClient, UserStatus> _statuses;
 
         public Activity Activity { get; }
 
         public IReadOnlyList<Activity> Activities => _activities ?? throw new InvalidOperationException("Bots cannot have multiple activities.");
-        private IReadOnlyList<Activity> _activities;
+        private readonly IReadOnlyList<Activity> _activities;
 
         internal Presence(bool isBot, PresenceUpdateModel model)
         {
@@ -28,10 +27,10 @@ namespace Disqord
 
             if (!isBot)
             {
-                _statuses = new ReadOnlyDictionary<UserClient, UserStatus>(model.ClientStatus);
+                _statuses = model.ClientStatus.ReadOnly();
                 _activities = model.Game != null
-                    ? model.Activities.Select(x => Activity.Create(x)).ToImmutableArray()
-                    : ImmutableArray<Activity>.Empty;
+                    ? model.Activities.ToReadOnlyList(x => Activity.Create(x))
+                    : ReadOnlyList<Activity>.Empty;
             }
         }
     }

@@ -1,6 +1,5 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
 using Disqord.Collections;
 using Disqord.Logging;
 using Disqord.Models;
@@ -10,23 +9,37 @@ namespace Disqord
 {
     internal sealed partial class DiscordClientState
     {
+        public ReadOnlyDictionary<Snowflake, CachedGuild> Guilds { get; }
+        public ReadOnlyUpcastingDictionary<Snowflake, CachedSharedUser, CachedUser> Users { get; }
+        public ReadOnlyDictionary<Snowflake, CachedPrivateChannel> PrivateChannels { get; }
+        public ReadOnlyOfTypeDictionary<Snowflake, CachedPrivateChannel, CachedDmChannel> DmChannels { get; }
+        public ReadOnlyOfTypeDictionary<Snowflake, CachedPrivateChannel, CachedGroupChannel> GroupChannels { get; }
+
         internal CachedCurrentUser _currentUser;
         internal readonly MessageCache _messageCache;
         internal readonly LockedDictionary<Snowflake, CachedGuild> _guilds;
         internal readonly LockedDictionary<Snowflake, CachedSharedUser> _users;
         internal readonly LockedDictionary<Snowflake, CachedPrivateChannel> _privateChannels;
 
-        private IJsonSerializer Serializer => _client.Serializer;
-        private readonly DiscordClientBase _client;
+        internal IJsonSerializer Serializer => _client.Serializer;
+        internal ILogger Logger => _client.Logger;
+
+        internal DiscordClientBase _client;
 
         public DiscordClientState(DiscordClientBase client, MessageCache messageCache)
         {
             _client = client;
-            _messageCache = messageCache;
+            _messageCache = messageCache ?? DummyMessageCache.Instance;
 
             _guilds = new LockedDictionary<Snowflake, CachedGuild>();
             _users = new LockedDictionary<Snowflake, CachedSharedUser>();
             _privateChannels = new LockedDictionary<Snowflake, CachedPrivateChannel>();
+
+            Guilds = new ReadOnlyDictionary<Snowflake, CachedGuild>(_guilds);
+            Users = new ReadOnlyUpcastingDictionary<Snowflake, CachedSharedUser, CachedUser>(_users);
+            PrivateChannels = new ReadOnlyDictionary<Snowflake, CachedPrivateChannel>(_privateChannels);
+            DmChannels = new ReadOnlyOfTypeDictionary<Snowflake, CachedPrivateChannel, CachedDmChannel>(_privateChannels);
+            GroupChannels = new ReadOnlyOfTypeDictionary<Snowflake, CachedPrivateChannel, CachedGroupChannel>(_privateChannels);
         }
 
         internal void Log(LogMessageSeverity severity, string message, Exception exception = null)
@@ -46,8 +59,8 @@ namespace Disqord
                 return null;
 
             return _messageCache.TryGetMessages(channelId, out var messages)
-                ? messages.ToImmutableArray()
-                : ImmutableArray<CachedUserMessage>.Empty;
+                ? messages.ToReadOnlyList()
+                : ReadOnlyList<CachedUserMessage>.Empty;
         }
 
         public CachedGuild GetGuild(Snowflake id)

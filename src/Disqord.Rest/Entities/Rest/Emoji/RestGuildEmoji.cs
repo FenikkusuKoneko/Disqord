@@ -1,14 +1,15 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Collections.Immutable;
-using System.Linq;
-using System.Threading.Tasks;
+﻿using System.Collections.Generic;
+using Disqord.Collections;
 using Disqord.Models;
 
 namespace Disqord.Rest
 {
-    public sealed class RestGuildEmoji : RestSnowflakeEntity, IGuildEmoji
+    public sealed partial class RestGuildEmoji : RestSnowflakeEntity, IGuildEmoji
     {
+        public Snowflake GuildId { get; }
+
+        public RestFetchable<RestGuild> Guild { get; }
+
         public string Name { get; private set; }
 
         public IReadOnlyList<Snowflake> RoleIds { get; private set; }
@@ -19,9 +20,7 @@ namespace Disqord.Rest
 
         public bool IsAnimated { get; }
 
-        public Snowflake GuildId { get; }
-
-        public RestDownloadable<RestGuild> Guild { get; }
+        public bool IsAvailable { get; private set; }
 
         public string ReactionFormat => Discord.ToReactionFormat(this);
 
@@ -32,21 +31,24 @@ namespace Disqord.Rest
         internal RestGuildEmoji(RestDiscordClient client, Snowflake guildId, EmojiModel model) : base(client, model.Id.Value)
         {
             GuildId = guildId;
-            Guild = new RestDownloadable<RestGuild>(options => Client.GetGuildAsync(GuildId, options));
+            Guild = RestFetchable.Create(this, (@this, options) =>
+                @this.Client.GetGuildAsync(@this.GuildId, options));
             RequiresColons = model.RequireColons;
             IsManaged = model.Managed;
             IsAnimated = model.Animated;
+
             Update(model);
         }
 
         internal void Update(EmojiModel model)
         {
             Name = model.Name;
-            RoleIds = model.Roles.Select(x => new Snowflake(x)).ToImmutableArray();
+            RoleIds = model.Roles.ToSnowflakeList();
+            IsAvailable = model.Available;
         }
 
         public string GetUrl(int size = 2048)
-            => Discord.GetCustomEmojiUrl(Id, IsAnimated, size);
+            => Discord.Cdn.GetCustomEmojiUrl(Id, IsAnimated, size);
 
         public bool Equals(IEmoji other)
             => Discord.Comparers.Emoji.Equals(this, other);
@@ -59,14 +61,5 @@ namespace Disqord.Rest
 
         public override string ToString()
             => MessageFormat;
-
-        public Task DeleteAsync(RestRequestOptions options = null)
-            => Client.DeleteGuildEmojiAsync(GuildId, Id, options);
-
-        public async Task ModifyAsync(Action<ModifyGuildEmojiProperties> action, RestRequestOptions options = null)
-        {
-            var model = await Client.InternalModifyGuildEmojiAsync(GuildId, Id, action, options).ConfigureAwait(false);
-            Update(model);
-        }
     }
 }

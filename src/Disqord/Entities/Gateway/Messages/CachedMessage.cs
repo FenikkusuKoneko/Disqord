@@ -1,9 +1,6 @@
 ﻿using System.Collections.Generic;
-using System.Collections.Immutable;
-using System.Linq;
 using Disqord.Collections;
 using Disqord.Models;
-using Qommon.Collections;
 
 namespace Disqord
 {
@@ -19,11 +16,9 @@ namespace Disqord
 
         public IReadOnlyList<CachedUser> MentionedUsers { get; private set; }
 
-        public IReadOnlyDictionary<IEmoji, ReactionData> Reactions { get; }
+        public IReadOnlyDictionary<IEmoji, ReactionData> Reactions => _reactions.ReadOnly();
 
-        public string JumpUrl => Guild != null
-            ? $"https://discordapp.com/channels/{Guild.Id}/{Channel.Id}/{Id}"
-            : $"https://discordapp.com/channels/@me/{Channel.Id}/{Id}";
+        public string JumpUrl => Discord.MessageJumpLink(Guild?.Id, Channel.Id, Id);
 
         internal readonly LockedDictionary<IEmoji, ReactionData> _reactions;
 
@@ -36,24 +31,21 @@ namespace Disqord
             Channel = channel;
             Author = author;
             _reactions = new LockedDictionary<IEmoji, ReactionData>(model.Reactions.HasValue
-                ? model.Reactions.Value.Length
+                ? model.Reactions.Value?.Length ?? 0
                 : 0);
-            Reactions = new ReadOnlyDictionary<IEmoji, ReactionData>(_reactions);
         }
 
-        internal static CachedMessage Create(ICachedMessageChannel channel, CachedUser author, MessageModel model)
+        internal static CachedMessage Create(ICachedMessageChannel channel, CachedUser author, MessageModel model) => model.Type switch
         {
-            return model.Type switch
-            {
-                MessageType.Default => new CachedUserMessage(channel, author, model),
-                _ => new CachedSystemMessage(channel, author, model),
-            };
-        }
+            MessageType.Default => new CachedUserMessage(channel, author, model),
+            _ => new CachedSystemMessage(channel, author, model),
+        };
 
         internal virtual void Update(MessageModel model)
         {
             if (model.Mentions.HasValue)
-                MentionedUsers = model.Mentions.Value.Select(x => Client.GetUser(x.Id)).ToImmutableArray();
+                MentionedUsers = model.Mentions.Value.ToReadOnlyList(
+                    this, (x, @this) => @this.Client.State.GetSharedOrUnknownUser(x));
         }
     }
 }

@@ -1,11 +1,8 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-using Disqord.Rest;
+﻿using System.Collections.Generic;
 
 namespace Disqord
 {
-    public interface IGuildEmoji : ISnowflakeEntity, ICustomEmoji, IDeletable
+    public partial interface IGuildEmoji : ISnowflakeEntity, ICustomEmoji, IDeletable
     {
         IReadOnlyList<Snowflake> RoleIds { get; }
 
@@ -15,6 +12,6 @@ namespace Disqord
 
         bool IsManaged { get; }
 
-        Task ModifyAsync(Action<ModifyGuildEmojiProperties> action, RestRequestOptions options = null);
+        bool IsAvailable { get; }
     }
 }

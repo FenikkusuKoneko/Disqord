@@ -1,13 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
 using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using Disqord.Collections;
 using Disqord.Models;
 using Disqord.Models.Dispatches;
-using Qommon.Collections;
 
 namespace Disqord
 {
@@ -18,6 +16,8 @@ namespace Disqord
         public string IconHash { get; private set; }
 
         public string SplashHash { get; private set; }
+
+        public string DiscoverySplashHash { get; private set; }
 
         public Snowflake OwnerId { get; private set; }
 
@@ -83,21 +83,25 @@ namespace Disqord
 
         public CachedRole DefaultRole => Roles[Id];
 
-        public IReadOnlyDictionary<Snowflake, CachedRole> Roles { get; }
+        public IReadOnlyDictionary<Snowflake, CachedRole> Roles => _roles.ReadOnly();
 
-        public IReadOnlyDictionary<Snowflake, CachedGuildEmoji> Emojis { get; }
+        public IReadOnlyDictionary<Snowflake, CachedGuildEmoji> Emojis => _emojis.ReadOnly();
 
-        public IReadOnlyDictionary<Snowflake, CachedGuildChannel> Channels { get; }
+        public IReadOnlyDictionary<Snowflake, CachedGuildChannel> Channels => _channels.ReadOnly();
 
-        public IReadOnlyDictionary<Snowflake, CachedNestedChannel> NestedChannels { get; }
+        public IReadOnlyDictionary<Snowflake, CachedNestedChannel> NestedChannels
+            => new ReadOnlyOfTypeDictionary<Snowflake, CachedGuildChannel, CachedNestedChannel>(_channels);
 
-        public IReadOnlyDictionary<Snowflake, CachedTextChannel> TextChannels { get; }
+        public IReadOnlyDictionary<Snowflake, CachedTextChannel> TextChannels
+            => new ReadOnlyOfTypeDictionary<Snowflake, CachedGuildChannel, CachedTextChannel>(_channels);
 
-        public IReadOnlyDictionary<Snowflake, CachedVoiceChannel> VoiceChannels { get; }
+        public IReadOnlyDictionary<Snowflake, CachedVoiceChannel> VoiceChannels
+            => new ReadOnlyOfTypeDictionary<Snowflake, CachedGuildChannel, CachedVoiceChannel>(_channels);
 
-        public IReadOnlyDictionary<Snowflake, CachedCategoryChannel> CategoryChannels { get; }
+        public IReadOnlyDictionary<Snowflake, CachedCategoryChannel> CategoryChannels
+            => new ReadOnlyOfTypeDictionary<Snowflake, CachedGuildChannel, CachedCategoryChannel>(_channels);
 
-        public IReadOnlyDictionary<Snowflake, CachedMember> Members { get; }
+        public IReadOnlyDictionary<Snowflake, CachedMember> Members => _members.ReadOnly();
 
         public bool IsSynced
         {
@@ -161,15 +165,7 @@ namespace Disqord
             _roles = new LockedDictionary<Snowflake, CachedRole>(model.Roles.Value.Length);
             _emojis = new LockedDictionary<Snowflake, CachedGuildEmoji>(model.Emojis.Value.Length);
             _channels = new LockedDictionary<Snowflake, CachedGuildChannel>(model.Channels.Length);
-            _members = new LockedDictionary<Snowflake, CachedMember>(model.Members.Length);
-            Roles = new ReadOnlyDictionary<Snowflake, CachedRole>(_roles);
-            Emojis = new ReadOnlyDictionary<Snowflake, CachedGuildEmoji>(_emojis);
-            Channels = new ReadOnlyDictionary<Snowflake, CachedGuildChannel>(_channels);
-            Members = new ReadOnlyDictionary<Snowflake, CachedMember>(_members);
-            NestedChannels = new ReadOnlyOfTypeDictionary<Snowflake, CachedGuildChannel, CachedNestedChannel>(_channels);
-            TextChannels = new ReadOnlyOfTypeDictionary<Snowflake, CachedGuildChannel, CachedTextChannel>(_channels);
-            VoiceChannels = new ReadOnlyOfTypeDictionary<Snowflake, CachedGuildChannel, CachedVoiceChannel>(_channels);
-            CategoryChannels = new ReadOnlyOfTypeDictionary<Snowflake, CachedGuildChannel, CachedCategoryChannel>(_channels);
+            _members = new LockedDictionary<Snowflake, CachedMember>(model.MemberCount);
 
             Update(model);
             if (client.IsBot && IsLarge)
@@ -282,7 +278,8 @@ namespace Disqord
             for (var i = 0; i < models.Length; i++)
             {
                 var presenceModel = models[i];
-                _members[presenceModel.User.Id].Update(presenceModel);
+                if (_members.TryGetValue(presenceModel.User.Id, out var member))
+                    member.Update(presenceModel);
             }
         }
 
@@ -293,11 +290,13 @@ namespace Disqord
             for (var i = 0; i < model.Channels.Length; i++)
             {
                 var channelModel = model.Channels[i];
-                _channels.AddOrUpdate(channelModel.Id, _ => CachedGuildChannel.Create(this, channelModel), (_, old) =>
-                {
-                    old.Update(channelModel);
-                    return old;
-                });
+                _channels.AddOrUpdate(channelModel.Id,
+                    _ => CachedGuildChannel.Create(this, channelModel),
+                    (_, old) =>
+                    {
+                        old.Update(channelModel);
+                        return old;
+                    });
             }
 
             Update(model.Members);
@@ -326,6 +325,9 @@ namespace Disqord
 
             if (model.Splash.HasValue)
                 SplashHash = model.Splash.Value;
+
+            if (model.DiscoverySplash.HasValue)
+                DiscoverySplashHash = model.DiscoverySplash.Value;
 
             if (model.OwnerId.HasValue)
                 OwnerId = model.OwnerId.Value;
@@ -361,7 +363,7 @@ namespace Disqord
                 Update(model.Emojis.Value);
 
             if (model.Features.HasValue)
-                Features = model.Features.Value.ToImmutableArray();
+                Features = model.Features.Value.ReadOnly();
 
             if (model.MfaLevel.HasValue)
                 MfaLevel = model.MfaLevel.Value;
@@ -462,13 +464,16 @@ namespace Disqord
             => _roles.GetValueOrDefault(id);
 
         public string GetIconUrl(ImageFormat format = default, int size = 2048)
-            => Discord.GetGuildIconUrl(Id, IconHash, format, size);
+            => Discord.Cdn.GetGuildIconUrl(Id, IconHash, format, size);
 
         public string GetSplashUrl(int size = 2048)
-            => Discord.GetGuildSplashUrl(Id, SplashHash, ImageFormat.Png, 2048);
+            => Discord.Cdn.GetGuildSplashUrl(Id, SplashHash, ImageFormat.Png, size);
+
+        public string GetDiscoverySplashUrl(int size = 2048)
+            => Discord.Cdn.GetGuildDiscoverySplashUrl(Id, DiscoverySplashHash, ImageFormat.Png, size);
 
         public string GetBannerUrl(int size = 2048)
-            => Discord.GetGuildBannerUrl(Id, SplashHash, ImageFormat.Png, 2048);
+            => Discord.Cdn.GetGuildBannerUrl(Id, BannerHash, ImageFormat.Png, size);
 
         public override string ToString()
             => Name;

@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using System.Threading;
 using System.Threading.Tasks;
 using Disqord.Logging;
 using Disqord.Models;
@@ -14,7 +15,7 @@ namespace Disqord
         {
             switch (payload.Op)
             {
-                case Opcode.Dispatch:
+                case GatewayOperationCode.Dispatch:
                 {
                     try
                     {
@@ -27,33 +28,27 @@ namespace Disqord
                     break;
                 }
 
-                case Opcode.Heartbeat:
+                case GatewayOperationCode.Heartbeat:
                 {
                     Log(LogMessageSeverity.Debug, "Heartbeat requested. Sending...");
-                    await SendHeartbeatAsync().ConfigureAwait(false);
+                    await SendHeartbeatAsync(CancellationToken.None).ConfigureAwait(false);
                     break;
                 }
 
-                case Opcode.Reconnect:
+                case GatewayOperationCode.Reconnect:
                 {
                     Log(LogMessageSeverity.Information, "Reconnect requested, closing...");
-                    try
-                    {
-                        _heartbeatCts?.Cancel();
-                    }
-                    catch { }
-                    _heartbeatCts?.Dispose();
+                    _heartbeatCts?.Cancel();
                     await _ws.CloseAsync().ConfigureAwait(false);
                     break;
                 }
 
-                case Opcode.InvalidSession:
+                case GatewayOperationCode.InvalidSession:
                 {
                     Log(LogMessageSeverity.Warning, "Received invalid session...");
-                    if (_resuming)
+                    if (_sessionId != null)
                     {
                         _sessionId = null;
-                        _resuming = false;
                         var delay = _random.Next(1000, 5001);
                         Log(LogMessageSeverity.Information, $"Currently resuming, starting a new session in {delay}ms.");
                         await Task.Delay(delay).ConfigureAwait(false);
@@ -64,7 +59,6 @@ namespace Disqord
                         if (Serializer.ToObject<bool>(payload.D))
                         {
                             Log(LogMessageSeverity.Information, "Session is resumable, resuming...");
-                            _resuming = true;
                             await SendResumeAsync().ConfigureAwait(false);
                         }
                         else
@@ -77,15 +71,16 @@ namespace Disqord
                     break;
                 }
 
-                case Opcode.Hello:
+                case GatewayOperationCode.Hello:
                 {
-                    Log(LogMessageSeverity.Debug, "Received Hello...");
                     var data = Serializer.ToObject<HelloModel>(payload.D);
                     _heartbeatInterval = data.HeartbeatInterval;
-                    _ = RunHeartbeatAsync();
-                    if (_resuming)
+                    _ = Task.Run(RunHeartbeatAsync);
+
+                    if (_sessionId != null)
                     {
-                        Log(LogMessageSeverity.Information, "Received Hello after requesting a resume, not identifying.");
+                        Log(LogMessageSeverity.Information, "Session id is present, attempting to resume...");
+                        await SendResumeAsync().ConfigureAwait(false);
                         return;
                     }
 
@@ -94,7 +89,7 @@ namespace Disqord
                     break;
                 }
 
-                case Opcode.HeartbeatAck:
+                case GatewayOperationCode.HeartbeatAck:
                 {
                     Log(LogMessageSeverity.Debug, "Acknowledged Heartbeat.");
                     _lastHeartbeatAck = DateTimeOffset.UtcNow;

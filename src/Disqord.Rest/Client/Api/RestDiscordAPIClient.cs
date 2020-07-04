@@ -4,8 +4,10 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
+using Disqord;
 using Disqord.Logging;
 using Disqord.Models;
 using Disqord.Serialization.Json;
@@ -27,20 +29,18 @@ namespace Disqord.Rest
         private static readonly TimeSpan _defaultTimeout = TimeSpan.FromSeconds(20);
 
         internal readonly HttpClient Http;
-
-        internal readonly TokenType TokenType;
-
-        internal readonly string Token;
-
         internal readonly ILogger Logger;
-
         internal readonly IJsonSerializer Serializer;
+        private readonly RestRequestOptions _defaultRequestOptions;
+        private readonly AllowedMentionsModel _defaultMentions;
+
+        internal TokenType? _tokenType;
+        internal string _token;
 
         private readonly RateLimiter _rateLimiter;
 
-        public RestDiscordApiClient(TokenType tokenType, string token, ILogger logger, IJsonSerializer serializer)
+        public RestDiscordApiClient(TokenType? tokenType, string token, RestDiscordClientConfiguration configuration)
         {
-            TokenType = tokenType;
             Http = new HttpClient(new HttpClientHandler
             {
                 AutomaticDecompression = DecompressionMethods.Deflate | DecompressionMethods.GZip
@@ -50,43 +50,84 @@ namespace Disqord.Rest
                 Timeout = Timeout.InfiniteTimeSpan
             };
             Http.DefaultRequestHeaders.Add("Accept-Encoding", "deflate, gzip");
-
-            if (token != null)
+            if (tokenType != null)
             {
-                Token = PrefixToken(tokenType, token);
-                Http.DefaultRequestHeaders.Add("Authorization", Token);
+                SetTokenType(tokenType.Value);
+                SetToken(token);
+            }
+            else
+            {
+                SetUserAgent();
             }
 
-            Logger = logger ?? new DefaultLogger();
-            Serializer = serializer ?? GetDefaultSerializer();
+            Logger = configuration.Logger.GetValueOrDefault(() => new DefaultLogger());
+            Serializer = configuration.Serializer.GetValueOrDefault(@this => @this.GetDefaultSerializer(), this);
+            _defaultRequestOptions = configuration.DefaultRequestOptions.GetValueOrDefault() ?? new RestRequestOptions();
+            _defaultMentions = configuration.DefaultMentions.GetValueOrDefault().ToModel();
             _rateLimiter = RateLimiter.GetOrCreate(this);
+        }
+
+        public void ResetToken()
+        {
+            _tokenType = null;
+            _token = null;
+            SetUserAgent();
+            SetAuthorization();
+        }
+
+        public void SetTokenType(TokenType tokenType)
+        {
+            _tokenType = tokenType;
+            SetUserAgent();
+        }
+
+        public void SetToken(string token)
+        {
+            _token = _tokenType switch
+            {
+                TokenType.Bearer => $"Bearer {token}",
+                TokenType.Bot => $"Bot {token}",
+                TokenType.User => token,
+                _ => throw new ArgumentOutOfRangeException(nameof(_tokenType), "Invalid token type."),
+            };
+            SetAuthorization();
+        }
+
+        private void SetUserAgent()
+        {
+            var userAgent = Http.DefaultRequestHeaders.UserAgent;
+            userAgent.Clear();
+            userAgent.ParseAdd(_tokenType == TokenType.User
+                ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.117 Safari/537.36"
+                : Library.UserAgent);
+        }
+
+        private void SetAuthorization()
+        {
+            Http.DefaultRequestHeaders.Authorization = _tokenType != null
+                ? AuthenticationHeaderValue.Parse(_token)
+                : null;
         }
 
         private IJsonSerializer GetDefaultSerializer()
             => NewtonsoftJsonSerializer.Instance;
 
-        internal static string PrefixToken(TokenType tokenType, string token)
-            => tokenType switch
-            {
-                TokenType.Bearer => $"Bearer {token}",
-                TokenType.Bot => $"Bot {token}",
-                TokenType.User => token,
-                _ => throw new ArgumentOutOfRangeException(nameof(tokenType), "Invalid token type."),
-            };
-
         private async Task EnqueueRequestAsync(RestRequest request)
         {
             request.Initialise(Serializer);
-            await _rateLimiter.EnqueueRequestAsync(request).ConfigureAwait(false);
+            _rateLimiter.EnqueueRequest(request);
         }
 
         internal async Task<RateLimit> HandleRequestAsync(RestRequest request)
         {
             Log(LogMessageSeverity.Debug, $"Handling {request}.");
             HttpResponseMessage response;
-            var options = request.Options;
-            using (var cts = new CancellationTokenSource(options != null && options.Timeout != default ? options.Timeout : _defaultTimeout))
-            using (var linkedCts = options != null ? CancellationTokenSource.CreateLinkedTokenSource(cts.Token, options.CancellationToken) : null)
+            using (var cts = new CancellationTokenSource(request.Options.Timeout != default
+                ? request.Options.Timeout
+                : _defaultTimeout))
+            using (var linkedCts = request.Options.CancellationToken != default
+                ? CancellationTokenSource.CreateLinkedTokenSource(cts.Token, request.Options.CancellationToken)
+                : null)
             {
                 var ticks = Environment.TickCount;
                 response = await Http.SendAsync(request.HttpMessage, HttpCompletionOption.ResponseHeadersRead, linkedCts?.Token ?? cts.Token).ConfigureAwait(false);
@@ -104,7 +145,7 @@ namespace Disqord.Rest
                 {
                     case 429: // TODO
                     {
-                        await _rateLimiter.HandleRateLimitedAsync(rateLimit).ConfigureAwait(false);
+                        await _rateLimiter.HandleRateLimitedAsync(request, rateLimit).ConfigureAwait(false);
 
                         if (rateLimit.IsGlobal)
                             await SetExceptionAsync(response, request).ConfigureAwait(false);
@@ -113,8 +154,10 @@ namespace Disqord.Rest
                     }
 
                     default:
+                    {
                         await SetExceptionAsync(response, request).ConfigureAwait(false);
                         break;
+                    }
                 }
             }
             else
@@ -153,6 +196,18 @@ namespace Disqord.Rest
             }
         }
 
+        private RestRequest CreateRequest(HttpMethod method, FormattableString url, RestRequestOptions options)
+            => CreateRequest(method, url, null, null, options);
+
+        private RestRequest CreateRequest(HttpMethod method, FormattableString url, IRequestContent content, RestRequestOptions options)
+            => CreateRequest(method, url, null, content, options);
+
+        private RestRequest CreateRequest(HttpMethod method, FormattableString url, IReadOnlyDictionary<string, object> queryStringParameters, RestRequestOptions options)
+            => CreateRequest(method, url, queryStringParameters, null, options);
+
+        private RestRequest CreateRequest(HttpMethod method, FormattableString url, IReadOnlyDictionary<string, object> queryStringParameters, IRequestContent content, RestRequestOptions options)
+            => new RestRequest(method, url, queryStringParameters, content, options ?? _defaultRequestOptions);
+
         // Audit Log
         public Task<AuditLogModel> GetGuildAuditLogAsync(ulong guildId, int limit, ulong? userId, AuditLogType? type, ulong? before, RestRequestOptions options)
         {
@@ -170,12 +225,12 @@ namespace Disqord.Rest
             if (before != null)
                 parameters["before"] = before;
 
-            return SendRequestAsync<AuditLogModel>(new RestRequest(GET, $"guilds/{guildId:guild_id}/audit-logs", parameters, options));
+            return SendRequestAsync<AuditLogModel>(CreateRequest(GET, $"guilds/{guildId:guild_id}/audit-logs", parameters, options));
         }
 
         // Channel
         public Task<ChannelModel> GetChannelAsync(ulong channelId, RestRequestOptions options)
-            => SendRequestAsync<ChannelModel>(new RestRequest(GET, $"channels/{channelId:channel_id}", options));
+            => SendRequestAsync<ChannelModel>(CreateRequest(GET, $"channels/{channelId:channel_id}", options));
 
         public Task<ChannelModel> ModifyChannelAsync(ulong channelId, ModifyChannelProperties properties, RestRequestOptions options)
         {
@@ -231,11 +286,11 @@ namespace Disqord.Rest
                 Log(LogMessageSeverity.Error, $"Unknown channel properties provided to modify. ({properties.GetType()})");
             }
 
-            return SendRequestAsync<ChannelModel>(new RestRequest(PATCH, $"channels/{channelId:channel_id}", requestContent, options));
+            return SendRequestAsync<ChannelModel>(CreateRequest(PATCH, $"channels/{channelId:channel_id}", requestContent, options));
         }
 
         public Task DeleteOrCloseChannelAsync(ulong channelId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"channels/{channelId}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"channels/{channelId}", options));
 
         public Task<MessageModel[]> GetChannelMessagesAsync(ulong channelId, int limit, RetrievalDirection? direction, ulong? snowflake, RestRequestOptions options)
         {
@@ -276,24 +331,25 @@ namespace Disqord.Rest
                 }
             }
 
-            return SendRequestAsync<MessageModel[]>(new RestRequest(GET, $"channels/{channelId:channel_id}/messages", parameters, options));
+            return SendRequestAsync<MessageModel[]>(CreateRequest(GET, $"channels/{channelId:channel_id}/messages", parameters, options));
         }
 
         public Task<MessageModel> GetChannelMessageAsync(ulong channelId, ulong messageId, RestRequestOptions options)
-            => SendRequestAsync<MessageModel>(new RestRequest(GET, $"channels/{channelId:channel_id}/messages/{messageId}", options));
+            => SendRequestAsync<MessageModel>(CreateRequest(GET, $"channels/{channelId:channel_id}/messages/{messageId}", options));
 
-        public Task<MessageModel> CreateMessageAsync(ulong channelId, string content, bool isTTS, LocalEmbed embed, RestRequestOptions options)
+        public Task<MessageModel> CreateMessageAsync(ulong channelId, string content, bool isTTS, LocalEmbed embed, LocalMentions mentions, RestRequestOptions options)
         {
             var requestContent = new CreateMessageContent
             {
                 Content = content,
                 Tts = isTTS,
-                Embed = embed.ToModel()
+                Embed = embed.ToModel(),
+                AllowedMentions = mentions.ToModel() ?? _defaultMentions
             };
-            return SendRequestAsync<MessageModel>(new RestRequest(POST, $"channels/{channelId:channel_id}/messages", requestContent, options));
+            return SendRequestAsync<MessageModel>(CreateRequest(POST, $"channels/{channelId:channel_id}/messages", requestContent, options));
         }
 
-        public Task<MessageModel> CreateMessageAsync(ulong channelId, LocalAttachment attachment, string content, bool isTTS, LocalEmbed embed, RestRequestOptions options)
+        public Task<MessageModel> CreateMessageAsync(ulong channelId, LocalAttachment attachment, string content, bool isTTS, LocalEmbed embed, LocalMentions mentions, RestRequestOptions options)
         {
             var requestContent = new MultipartRequestContent<CreateMessageContent>
             {
@@ -301,14 +357,15 @@ namespace Disqord.Rest
                 {
                     Content = content,
                     Tts = isTTS,
-                    Embed = embed.ToModel()
+                    Embed = embed.ToModel(),
+                    AllowedMentions = mentions.ToModel() ?? _defaultMentions
                 },
                 Attachment = attachment
             };
-            return SendRequestAsync<MessageModel>(new RestRequest(POST, $"channels/{channelId:channel_id}/messages", requestContent, options));
+            return SendRequestAsync<MessageModel>(CreateRequest(POST, $"channels/{channelId:channel_id}/messages", requestContent, options));
         }
 
-        public Task<MessageModel> CreateMessageAsync(ulong channelId, IEnumerable<LocalAttachment> attachments, string content, bool isTTS, LocalEmbed embed, RestRequestOptions options)
+        public Task<MessageModel> CreateMessageAsync(ulong channelId, IEnumerable<LocalAttachment> attachments, string content, bool isTTS, LocalEmbed embed, LocalMentions mentions, RestRequestOptions options)
         {
             var requestContent = new MultipartRequestContent<CreateMessageContent>
             {
@@ -316,23 +373,24 @@ namespace Disqord.Rest
                 {
                     Content = content,
                     Tts = isTTS,
-                    Embed = embed.ToModel()
+                    Embed = embed.ToModel(),
+                    AllowedMentions = mentions.ToModel() ?? _defaultMentions
                 },
                 Attachments = attachments.ToArray()
             };
-            return SendRequestAsync<MessageModel>(new RestRequest(POST, $"channels/{channelId:channel_id}/messages", requestContent, options));
+            return SendRequestAsync<MessageModel>(CreateRequest(POST, $"channels/{channelId:channel_id}/messages", requestContent, options));
         }
 
         public Task CreateReactionAsync(ulong channelId, ulong messageId, string emoji, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(PUT, $"channels/{channelId:channel_id}/messages/{messageId}/reactions/{emoji}/@me", options));
+            => SendRequestAsync(CreateRequest(PUT, $"channels/{channelId:channel_id}/messages/{messageId}/reactions/{emoji}/@me", options));
 
         public Task DeleteOwnReactionAsync(ulong channelId, ulong messageId, string emoji, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"channels/{channelId:channel_id}/messages/{messageId}/reactions/{emoji}/@me", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"channels/{channelId:channel_id}/messages/{messageId}/reactions/{emoji}/@me", options));
 
         public Task DeleteUserReactionAsync(ulong channelId, ulong messageId, ulong userId, string emoji, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"channels/{channelId:channel_id}/messages/{messageId}/reactions/{emoji}/{userId}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"channels/{channelId:channel_id}/messages/{messageId}/reactions/{emoji}/{userId}", options));
 
-        public Task<UserModel[]> GetReactionsAsync(ulong channelId, ulong messageId, string emoji, int limit, RetrievalDirection? direction, ulong? snowflake, RestRequestOptions options)
+        public Task<UserModel[]> GetReactionsAsync(ulong channelId, ulong messageId, string emoji, int limit, ulong? snowflake, RestRequestOptions options)
         {
             if (limit < 1 || limit > 100)
                 throw new ArgumentOutOfRangeException(nameof(limit), "Reaction users limit must be a positive number not larger than 100.");
@@ -342,37 +400,17 @@ namespace Disqord.Rest
                 ["limit"] = limit
             };
 
-            if (direction != null)
-            {
-                switch (direction.Value)
-                {
-                    case RetrievalDirection.Around:
-                        throw new NotSupportedException("Reaction users does not support Direction.Around.");
+            if (snowflake != null)
+                parameters["after"] = snowflake;
 
-                    case RetrievalDirection.Before:
-                    {
-                        if (snowflake != null)
-                            parameters["before"] = snowflake;
-
-                        break;
-                    }
-
-                    case RetrievalDirection.After:
-                    {
-                        parameters["after"] = snowflake ?? throw new ArgumentNullException(nameof(snowflake), "The snowflake to get reaction users after must not be null.");
-                        break;
-                    }
-
-                    default:
-                        throw new ArgumentOutOfRangeException(nameof(direction), "Invalid reaction users direction.");
-                }
-            }
-
-            return SendRequestAsync<UserModel[]>(new RestRequest(GET, $"channels/{channelId:channel_id}/messages/{messageId}/reactions/{emoji}", parameters, options));
+            return SendRequestAsync<UserModel[]>(CreateRequest(GET, $"channels/{channelId:channel_id}/messages/{messageId}/reactions/{emoji}", parameters, options));
         }
 
         public Task DeleteAllReactionsAsync(ulong channelId, ulong messageId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"channels/{channelId:channel_id}/messages/{messageId}/reactions", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"channels/{channelId:channel_id}/messages/{messageId}/reactions", options));
+
+        public Task DeleteAllReactionsForEmojiAsync(ulong channelId, ulong messageId, string emoji, RestRequestOptions options)
+            => SendRequestAsync(CreateRequest(DELETE, $"channels/{channelId:channel_id}/messages/{messageId}/reactions/{emoji}", options));
 
         public Task<MessageModel> EditMessageAsync(ulong channelId, ulong messageId, ModifyMessageProperties properties, RestRequestOptions options)
         {
@@ -381,16 +419,18 @@ namespace Disqord.Rest
                 Content = properties.Content,
                 Embed = properties.Embed.HasValue
                     ? properties.Embed.Value.ToModel()
-                    : Optional<EmbedModel>.Empty
+                    : Optional<EmbedModel>.Empty,
+                Flags = properties.Flags
             };
-            return SendRequestAsync<MessageModel>(new RestRequest(PATCH, $"channels/{channelId:channel_id}/messages/{messageId}", requestContent, options));
+            return SendRequestAsync<MessageModel>(CreateRequest(PATCH, $"channels/{channelId:channel_id}/messages/{messageId}", requestContent, options));
         }
 
         public Task DeleteMessageAsync(ulong channelId, ulong messageId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"channels/{channelId:channel_id}/messages/{messageId}", options)
-            {
-                BucketsMethod = true
-            });
+        {
+            var request = CreateRequest(DELETE, $"channels/{channelId:channel_id}/messages/{messageId}", options);
+            request.BucketsMethod = true;
+            return SendRequestAsync(request);
+        }
 
         public Task BulkDeleteMessagesAsync(ulong channelId, IEnumerable<ulong> messageIds, RestRequestOptions options)
         {
@@ -398,7 +438,7 @@ namespace Disqord.Rest
             {
                 Messages = messageIds
             };
-            return SendRequestAsync(new RestRequest(POST, $"channels/{channelId:channel_id}/messages/bulk-delete", requestContent, options));
+            return SendRequestAsync(CreateRequest(POST, $"channels/{channelId:channel_id}/messages/bulk-delete", requestContent, options));
         }
 
         public Task EditChannelPermissionsAsync(ulong channelId, LocalOverwrite overwrite, RestRequestOptions options)
@@ -409,11 +449,11 @@ namespace Disqord.Rest
                 Deny = overwrite.Permissions.Denied,
                 Type = overwrite.TargetType
             };
-            return SendRequestAsync(new RestRequest(PUT, $"channels/{channelId:channel_id}/permissions/{overwrite.TargetId}", requestContent, options));
+            return SendRequestAsync(CreateRequest(PUT, $"channels/{channelId:channel_id}/permissions/{overwrite.TargetId}", requestContent, options));
         }
 
         public Task<InviteModel[]> GetChannelInvitesAsync(ulong channelId, RestRequestOptions options)
-            => SendRequestAsync<InviteModel[]>(new RestRequest(GET, $"channels/{channelId:channel_id}/invites", options));
+            => SendRequestAsync<InviteModel[]>(CreateRequest(GET, $"channels/{channelId:channel_id}/invites", options));
 
         public Task<InviteModel> CreateInviteAsync(ulong channelId, int maxAge, int maxUses, bool isTemporaryMembership, bool isUnique, RestRequestOptions options)
         {
@@ -430,23 +470,23 @@ namespace Disqord.Rest
                 Temporary = isTemporaryMembership,
                 Unique = isUnique
             };
-            return SendRequestAsync<InviteModel>(new RestRequest(POST, $"channels/{channelId:channel_id}/invites", requestContent, options));
+            return SendRequestAsync<InviteModel>(CreateRequest(POST, $"channels/{channelId:channel_id}/invites", requestContent, options));
         }
 
         public Task DeleteChannelPermissionAsync(ulong channelId, ulong targetId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"channels/{channelId:channel_id}/permissions/{targetId}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"channels/{channelId:channel_id}/permissions/{targetId}", options));
 
         public Task TriggerTypingIndicatorAsync(ulong channelId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(POST, $"channels/{channelId:channel_id}/typing", options));
+            => SendRequestAsync(CreateRequest(POST, $"channels/{channelId:channel_id}/typing", options));
 
         public Task<MessageModel[]> GetPinnedMessagesAsync(ulong channelId, RestRequestOptions options)
-            => SendRequestAsync<MessageModel[]>(new RestRequest(GET, $"channels/{channelId:channel_id}/pins", options));
+            => SendRequestAsync<MessageModel[]>(CreateRequest(GET, $"channels/{channelId:channel_id}/pins", options));
 
         public Task AddPinnedMessageAsync(ulong channelId, ulong messageId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(PUT, $"channels/{channelId:channel_id}/pins/{messageId}", options));
+            => SendRequestAsync(CreateRequest(PUT, $"channels/{channelId:channel_id}/pins/{messageId}", options));
 
         public Task DeletePinnedMessageAsync(ulong channelId, ulong messageId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"channels/{channelId:channel_id}/pins/{messageId}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"channels/{channelId:channel_id}/pins/{messageId}", options));
 
         public Task GroupDmRecipientAddAsync(ulong channelId, ulong userId, string nick, string accessToken, RestRequestOptions options)
         {
@@ -455,18 +495,18 @@ namespace Disqord.Rest
                 AccessToken = accessToken,
                 Nick = nick
             };
-            return SendRequestAsync(new RestRequest(PUT, $"channels/{channelId:channel_id}/recipients/{userId}", requestContent, options));
+            return SendRequestAsync(CreateRequest(PUT, $"channels/{channelId:channel_id}/recipients/{userId}", requestContent, options));
         }
 
         public Task GroupDmRecipientRemoveAsync(ulong channelId, ulong userId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"channels/{channelId:channel_id}/recipients/{userId}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"channels/{channelId:channel_id}/recipients/{userId}", options));
 
         // Emoji
         public Task<EmojiModel[]> ListGuildEmojisAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync<EmojiModel[]>(new RestRequest(GET, $"guilds/{guildId:guild_id}/emojis", options));
+            => SendRequestAsync<EmojiModel[]>(CreateRequest(GET, $"guilds/{guildId:guild_id}/emojis", options));
 
         public Task<EmojiModel> GetGuildEmojiAsync(ulong guildId, ulong emojiId, RestRequestOptions options)
-            => SendRequestAsync<EmojiModel>(new RestRequest(GET, $"guilds/{guildId:guild_id}/emojis/{emojiId}", options));
+            => SendRequestAsync<EmojiModel>(CreateRequest(GET, $"guilds/{guildId:guild_id}/emojis/{emojiId}", options));
 
         public Task<EmojiModel> CreateGuildEmojiAsync(ulong guildId, Stream image, string name, IEnumerable<ulong> roleIds, RestRequestOptions options)
         {
@@ -476,7 +516,7 @@ namespace Disqord.Rest
                 Name = name,
                 RoleIds = roleIds?.ToArray()
             };
-            return SendRequestAsync<EmojiModel>(new RestRequest(POST, $"guilds/{guildId:guild_id}/emojis", requestContent, options));
+            return SendRequestAsync<EmojiModel>(CreateRequest(POST, $"guilds/{guildId:guild_id}/emojis", requestContent, options));
         }
 
         public Task<EmojiModel> ModifyGuildEmojiAsync(ulong guildId, ulong emojiId, ModifyGuildEmojiProperties properties, RestRequestOptions options)
@@ -488,11 +528,11 @@ namespace Disqord.Rest
                     ? properties.RoleIds.Value.Select(x => x.RawValue).ToArray()
                     : Optional<IReadOnlyList<ulong>>.Empty
             };
-            return SendRequestAsync<EmojiModel>(new RestRequest(PATCH, $"guilds/{guildId:guild_id}/emojis/{emojiId}", requestContent, options));
+            return SendRequestAsync<EmojiModel>(CreateRequest(PATCH, $"guilds/{guildId:guild_id}/emojis/{emojiId}", requestContent, options));
         }
 
         public Task DeleteGuildEmojiAsync(ulong guildId, ulong emojiId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"guilds/{guildId:guild_id}/emojis/{emojiId}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"guilds/{guildId:guild_id}/emojis/{emojiId}", options));
 
         // Guild
         public Task<GuildModel> CreateGuildAsync(
@@ -515,11 +555,11 @@ namespace Disqord.Rest
                 DefaultNotificationLevel = defaultNotificationLevel,
                 ContentFilterLevel = contentFilterLevel
             };
-            return SendRequestAsync<GuildModel>(new RestRequest(POST, $"guilds", requestContent, options));
+            return SendRequestAsync<GuildModel>(CreateRequest(POST, $"guilds", requestContent, options));
         }
 
         public Task<GuildModel> GetGuildAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync<GuildModel>(new RestRequest(GET, $"guilds/{guildId:guild_id}", options));
+            => SendRequestAsync<GuildModel>(CreateRequest(GET, $"guilds/{guildId:guild_id}", options));
 
         public Task<GuildModel> ModifyGuildAsync(ulong guildId, ModifyGuildProperties properties, RestRequestOptions options)
         {
@@ -544,14 +584,14 @@ namespace Disqord.Rest
                     : Optional<ulong>.Empty,
                 Banner = properties.Banner
             };
-            return SendRequestAsync<GuildModel>(new RestRequest(PATCH, $"guilds/{guildId:guild_id}", requestContent, options));
+            return SendRequestAsync<GuildModel>(CreateRequest(PATCH, $"guilds/{guildId:guild_id}", requestContent, options));
         }
 
         public Task DeleteGuildAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"guilds/{guildId:guild_id}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"guilds/{guildId:guild_id}", options));
 
         public Task<ChannelModel[]> GetGuildChannelsAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync<ChannelModel[]>(new RestRequest(GET, $"guilds/{guildId:guild_id}/channels", options));
+            => SendRequestAsync<ChannelModel[]>(CreateRequest(GET, $"guilds/{guildId:guild_id}/channels", options));
 
         public Task<ChannelModel> CreateGuildChannelAsync(ulong guildId, string name, CreateGuildChannelProperties properties, RestRequestOptions options)
         {
@@ -606,7 +646,7 @@ namespace Disqord.Rest
                 Log(LogMessageSeverity.Error, $"Unknown channel properties provided to modify ({properties.GetType()}).");
             }
 
-            return SendRequestAsync<ChannelModel>(new RestRequest(POST, $"guilds/{guildId:guild_id}/channels", requestContent, options));
+            return SendRequestAsync<ChannelModel>(CreateRequest(POST, $"guilds/{guildId:guild_id}/channels", requestContent, options));
         }
 
         public Task ModifyGuildChannelPositionsAsync(ulong guildId, IReadOnlyDictionary<Snowflake, int> channelPositions, RestRequestOptions options)
@@ -616,12 +656,12 @@ namespace Disqord.Rest
                 Id = x.Key.RawValue,
                 Position = x.Value
             });
-            var requestContent = new RawJsonContent(Serializer.Serialize(positions));
-            return SendRequestAsync(new RestRequest(PATCH, $"guilds/{guildId:guild_id}/channels", requestContent, options));
+            var requestContent = new JsonObjectContent(positions);
+            return SendRequestAsync(CreateRequest(PATCH, $"guilds/{guildId:guild_id}/channels", requestContent, options));
         }
 
         public Task<MemberModel> GetMemberAsync(ulong guildId, ulong userId, RestRequestOptions options)
-            => SendRequestAsync<MemberModel>(new RestRequest(GET, $"guilds/{guildId:guild_id}/members/{userId}", options));
+            => SendRequestAsync<MemberModel>(CreateRequest(GET, $"guilds/{guildId:guild_id}/members/{userId}", options));
 
         public Task<MemberModel[]> ListGuildMembersAsync(ulong guildId, int limit, ulong after, RestRequestOptions options)
         {
@@ -633,7 +673,7 @@ namespace Disqord.Rest
                 ["limit"] = limit,
                 ["after"] = after
             };
-            return SendRequestAsync<MemberModel[]>(new RestRequest(GET, $"guilds/{guildId:guild_id}/members", parameters, options));
+            return SendRequestAsync<MemberModel[]>(CreateRequest(GET, $"guilds/{guildId:guild_id}/members", parameters, options));
         }
 
         public Task ModifyCurrentUserNickAsync(ulong guildId, string nick, RestRequestOptions options)
@@ -642,7 +682,7 @@ namespace Disqord.Rest
             {
                 Nick = nick
             };
-            return SendRequestAsync(new RestRequest(PATCH, $"guilds/{guildId:guild_id}/members/@me/nick", requestContent, options));
+            return SendRequestAsync(CreateRequest(PATCH, $"guilds/{guildId:guild_id}/members/@me/nick", requestContent, options));
         }
 
         public Task ModifyGuildMemberAsync(ulong guildId, ulong userId, ModifyMemberProperties properties, RestRequestOptions options)
@@ -663,23 +703,23 @@ namespace Disqord.Rest
                         : (ulong?) null
                     : Optional<ulong?>.Empty
             };
-            return SendRequestAsync(new RestRequest(PATCH, $"guilds/{guildId:guild_id}/members/{userId}", requestContent, options));
+            return SendRequestAsync(CreateRequest(PATCH, $"guilds/{guildId:guild_id}/members/{userId}", requestContent, options));
         }
 
         public Task AddGuildMemberRoleAsync(ulong guildId, ulong userId, ulong roleId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(PUT, $"guilds/{guildId:guild_id}/members/{userId}/roles/{roleId}", options));
+            => SendRequestAsync(CreateRequest(PUT, $"guilds/{guildId:guild_id}/members/{userId}/roles/{roleId}", options));
 
         public Task DeleteGuildMemberRoleAsync(ulong guildId, ulong userId, ulong roleId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"guilds/{guildId:guild_id}/members/{userId}/roles/{roleId}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"guilds/{guildId:guild_id}/members/{userId}/roles/{roleId}", options));
 
         public Task RemoveMemberAsync(ulong guildId, ulong userId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"guilds/{guildId:guild_id}/members/{userId}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"guilds/{guildId:guild_id}/members/{userId}", options));
 
         public Task<BanModel[]> GetGuildBansAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync<BanModel[]>(new RestRequest(GET, $"guilds/{guildId:guild_id}/bans", options));
+            => SendRequestAsync<BanModel[]>(CreateRequest(GET, $"guilds/{guildId:guild_id}/bans", options));
 
         public Task<BanModel> GetGuildBanAsync(ulong guildId, ulong userId, RestRequestOptions options)
-            => SendRequestAsync<BanModel>(new RestRequest(GET, $"guilds/{guildId:guild_id}/bans/{userId}", options));
+            => SendRequestAsync<BanModel>(CreateRequest(GET, $"guilds/{guildId:guild_id}/bans/{userId}", options));
 
         public Task CreateGuildBanAsync(ulong guildId, ulong userId, string reason, int? deleteMessageDays, RestRequestOptions options)
         {
@@ -693,14 +733,14 @@ namespace Disqord.Rest
                 if (deleteMessageDays != null)
                     parameters["delete-message-days"] = deleteMessageDays.Value;
             }
-            return SendRequestAsync(new RestRequest(PUT, $"guilds/{guildId:guild_id}/bans/{userId}", parameters, options));
+            return SendRequestAsync(CreateRequest(PUT, $"guilds/{guildId:guild_id}/bans/{userId}", parameters, options));
         }
 
         public Task RemoveGuildBanAsync(ulong guildId, ulong userId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"guilds/{guildId:guild_id}/bans/{userId}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"guilds/{guildId:guild_id}/bans/{userId}", options));
 
         public Task<RoleModel[]> GetGuildRolesAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync<RoleModel[]>(new RestRequest(GET, $"guilds/{guildId:guild_id}/roles", options));
+            => SendRequestAsync<RoleModel[]>(CreateRequest(GET, $"guilds/{guildId:guild_id}/roles", options));
 
         public Task<RoleModel> CreateGuildRoleAsync(ulong guildId, CreateRoleProperties properties, RestRequestOptions options)
         {
@@ -716,7 +756,7 @@ namespace Disqord.Rest
                 Hoist = properties.IsHoisted,
                 Mentionable = properties.IsMentionable
             };
-            return SendRequestAsync<RoleModel>(new RestRequest(POST, $"guilds/{guildId:guild_id}/roles", requestContent, options));
+            return SendRequestAsync<RoleModel>(CreateRequest(POST, $"guilds/{guildId:guild_id}/roles", requestContent, options));
         }
 
         public Task<RoleModel[]> ModifyGuildRolePositionsAsync(ulong guildId, IReadOnlyDictionary<Snowflake, int> rolePositions, RestRequestOptions options)
@@ -726,8 +766,8 @@ namespace Disqord.Rest
                 Id = x.Key.RawValue,
                 Position = x.Value
             });
-            var requestContent = new RawJsonContent(Serializer.Serialize(positions));
-            return SendRequestAsync<RoleModel[]>(new RestRequest(PATCH, $"guilds/{guildId:guild_id}/roles", requestContent, options));
+            var requestContent = new JsonObjectContent(positions);
+            return SendRequestAsync<RoleModel[]>(CreateRequest(PATCH, $"guilds/{guildId:guild_id}/roles", requestContent, options));
         }
 
         public Task<RoleModel> ModifyGuildRoleAsync(ulong guildId, ulong roleId, ModifyRoleProperties properties, RestRequestOptions options)
@@ -742,11 +782,11 @@ namespace Disqord.Rest
                 Hoist = properties.IsHoisted,
                 Mentionable = properties.IsMentionable
             };
-            return SendRequestAsync<RoleModel>(new RestRequest(PATCH, $"guilds/{guildId:guild_id}/roles/{roleId}", requestContent, options));
+            return SendRequestAsync<RoleModel>(CreateRequest(PATCH, $"guilds/{guildId:guild_id}/roles/{roleId}", requestContent, options));
         }
 
         public Task DeleteGuildRoleAsync(ulong guildId, ulong roleId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"guilds/{guildId:guild_id}/roles/{roleId}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"guilds/{guildId:guild_id}/roles/{roleId}", options));
 
         public async Task<int> GetGuildPruneCountAsync(ulong guildId, int days, RestRequestOptions options)
         {
@@ -757,7 +797,7 @@ namespace Disqord.Rest
             {
                 ["days"] = days
             };
-            var model = await SendRequestAsync<PruneModel>(new RestRequest(GET, $"guilds/{guildId:guild_id}/prune", parameters, options)).ConfigureAwait(false);
+            var model = await SendRequestAsync<PruneModel>(CreateRequest(GET, $"guilds/{guildId:guild_id}/prune", parameters, options)).ConfigureAwait(false);
             return model.Pruned.Value;
         }
 
@@ -771,18 +811,18 @@ namespace Disqord.Rest
                 ["days"] = days,
                 ["compute_prune_count"] = computePruneCount
             };
-            var model = await SendRequestAsync<PruneModel>(new RestRequest(POST, $"guilds/{guildId:guild_id}/prune", parameters, options)).ConfigureAwait(false);
+            var model = await SendRequestAsync<PruneModel>(CreateRequest(POST, $"guilds/{guildId:guild_id}/prune", parameters, options)).ConfigureAwait(false);
             return model.Pruned;
         }
 
         public Task<VoiceRegionModel[]> GetGuildVoiceRegionsAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync<VoiceRegionModel[]>(new RestRequest(GET, $"guilds/{guildId:guild_id}/regions", options));
+            => SendRequestAsync<VoiceRegionModel[]>(CreateRequest(GET, $"guilds/{guildId:guild_id}/regions", options));
 
         public Task<InviteModel[]> GetGuildInvitesAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync<InviteModel[]>(new RestRequest(GET, $"guilds/{guildId:guild_id}/invites", options));
+            => SendRequestAsync<InviteModel[]>(CreateRequest(GET, $"guilds/{guildId:guild_id}/invites", options));
 
         public Task<IntegrationModel[]> GetGuildIntegrationsAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync<IntegrationModel[]>(new RestRequest(GET, $"guilds/{guildId:guild_id}/integrations", options));
+            => SendRequestAsync<IntegrationModel[]>(CreateRequest(GET, $"guilds/{guildId:guild_id}/integrations", options));
 
         public Task CreateGuildIntegrationsAsync(ulong guildId, string type, string id, RestRequestOptions options)
         {
@@ -791,11 +831,11 @@ namespace Disqord.Rest
                 Type = type,
                 Id = id
             };
-            return SendRequestAsync(new RestRequest(POST, $"guilds/{guildId:guild_id}/integrations", requestContent, options));
+            return SendRequestAsync(CreateRequest(POST, $"guilds/{guildId:guild_id}/integrations", requestContent, options));
         }
 
         public Task<WidgetModel> GetGuildEmbedAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync<WidgetModel>(new RestRequest(GET, $"guilds/{guildId:guild_id}/embed", options));
+            => SendRequestAsync<WidgetModel>(CreateRequest(GET, $"guilds/{guildId:guild_id}/embed", options));
 
         public Task<WidgetModel> ModifyGuildEmbedAsync(ulong guildId, ModifyWidgetProperties properties, RestRequestOptions options)
         {
@@ -808,12 +848,12 @@ namespace Disqord.Rest
                         : (ulong?) null
                     : Optional<ulong?>.Empty
             };
-            return SendRequestAsync<WidgetModel>(new RestRequest(PATCH, $"guilds/{guildId:guild_id}/embed", requestContent, options));
+            return SendRequestAsync<WidgetModel>(CreateRequest(PATCH, $"guilds/{guildId:guild_id}/embed", requestContent, options));
         }
 
         public async Task<string> GetGuildVanityUrlAsync(ulong guildId, RestRequestOptions options)
         {
-            var model = await SendRequestAsync<InviteModel>(new RestRequest(GET, $"guilds/{guildId:guild_id}/vanity-url", options)).ConfigureAwait(false);
+            var model = await SendRequestAsync<InviteModel>(CreateRequest(GET, $"guilds/{guildId:guild_id}/vanity-url", options)).ConfigureAwait(false);
             return model.Code;
         }
 
@@ -828,22 +868,22 @@ namespace Disqord.Rest
                     ["with_counts"] = withCounts.Value
                 };
             }
-            return SendRequestAsync<InviteModel>(new RestRequest(GET, $"invites/{code}", parameters, options));
+            return SendRequestAsync<InviteModel>(CreateRequest(GET, $"invites/{code}", parameters, options));
         }
 
         public Task<InviteModel> DeleteInviteAsync(string code, RestRequestOptions options)
-            => SendRequestAsync<InviteModel>(new RestRequest(DELETE, $"invites/{code}", options));
+            => SendRequestAsync<InviteModel>(CreateRequest(DELETE, $"invites/{code}", options));
 
         // User
         public Task<UserModel> GetCurrentUserAsync(RestRequestOptions options)
-            => SendRequestAsync<UserModel>(new RestRequest(GET, $"users/@me", options));
+            => SendRequestAsync<UserModel>(CreateRequest(GET, $"users/@me", options));
 
         public Task<UserModel> GetUserAsync(ulong userId, RestRequestOptions options)
-            => SendRequestAsync<UserModel>(new RestRequest(GET, $"users/{userId}", options));
+            => SendRequestAsync<UserModel>(CreateRequest(GET, $"users/{userId}", options));
 
         public Task<UserModel> ModifyCurrentUserAsync(ModifyCurrentUserProperties properties, RestRequestOptions options)
         {
-            if (TokenType == TokenType.User)
+            if (_tokenType == TokenType.User)
             {
                 if ((properties.Name.HasValue || properties.Password.HasValue || properties.Discriminator.HasValue)
                     && options.Password == null)
@@ -857,11 +897,53 @@ namespace Disqord.Rest
                 NewPassword = properties.Password,
                 Discriminator = properties.Discriminator
             };
-            return SendRequestAsync<UserModel>(new RestRequest(PATCH, $"users/@me", requestContent, options));
+            return SendRequestAsync<UserModel>(CreateRequest(PATCH, $"users/@me", requestContent, options));
+        }
+
+        public Task<GuildModel[]> GetCurrentUserGuildsAsync(int limit, RetrievalDirection? direction, ulong? snowflake, RestRequestOptions options)
+        {
+            if (limit < 1 || limit > 100)
+                throw new ArgumentOutOfRangeException(nameof(limit), "Limit must be a positive number not larger than 100.");
+
+            var parameters = new Dictionary<string, object>
+            {
+                ["limit"] = limit
+            };
+
+            if (direction != null)
+            {
+                switch (direction.Value)
+                {
+                    case RetrievalDirection.Around:
+                        throw new NotSupportedException("Guilds does not support Direction.Around.");
+
+                    case RetrievalDirection.Before:
+                    {
+                        if (snowflake != null)
+                            parameters["before"] = snowflake;
+
+                        break;
+                    }
+
+                    case RetrievalDirection.After:
+                    {
+                        parameters["after"] = snowflake ?? throw new ArgumentNullException(nameof(snowflake), "The snowflake to get guilds after must not be null.");
+                        break;
+                    }
+
+                    default:
+                        throw new ArgumentOutOfRangeException(nameof(direction), "Invalid guilds direction.");
+                }
+            }
+
+            return SendRequestAsync<GuildModel[]>(CreateRequest(GET, $"users/@me/guilds", parameters, options));
         }
 
         public Task LeaveGuildAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"users/@me/guilds/{guildId:guild_id}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"users/@me/guilds/{guildId:guild_id}", options));
+
+        public Task<ChannelModel[]> GetUserDmsAsync(RestRequestOptions options)
+            => SendRequestAsync<ChannelModel[]>(CreateRequest(GET, $"users/@me/channels", options));
 
         public Task<ChannelModel> CreateDmAsync(ulong recipientId, RestRequestOptions options)
         {
@@ -869,20 +951,23 @@ namespace Disqord.Rest
             {
                 RecipientId = recipientId
             };
-            return SendRequestAsync<ChannelModel>(new RestRequest(POST, $"users/@me/channels", requestContent, options));
+            return SendRequestAsync<ChannelModel>(CreateRequest(POST, $"users/@me/channels", requestContent, options));
         }
+
+        public Task<ConnectionModel[]> GetUserConnectionsAsync(RestRequestOptions options)
+            => SendRequestAsync<ConnectionModel[]>(CreateRequest(GET, $"users/@me/connections", options));
 
         // Voice
         public Task<VoiceRegionModel[]> ListVoiceRegionsAsync(RestRequestOptions options)
-            => SendRequestAsync<VoiceRegionModel[]>(new RestRequest(GET, $"voice/regions", options));
+            => SendRequestAsync<VoiceRegionModel[]>(CreateRequest(GET, $"voice/regions", options));
 
         // Aaaa
 
         public Task<GatewayModel> GetGatewayAsync(RestRequestOptions options)
-            => SendRequestAsync<GatewayModel>(new RestRequest(GET, $"gateway", options));
+            => SendRequestAsync<GatewayModel>(CreateRequest(GET, $"gateway", options));
 
         public Task<GatewayBotModel> GetGatewayBotAsync(RestRequestOptions options)
-            => SendRequestAsync<GatewayBotModel>(new RestRequest(GET, $"gateway/bot", options));
+            => SendRequestAsync<GatewayBotModel>(CreateRequest(GET, $"gateway/bot", options));
 
         public Task<WebhookModel> CreateWebhookAsync(ulong channelId, string name, Stream avatar, RestRequestOptions options)
         {
@@ -891,20 +976,20 @@ namespace Disqord.Rest
                 Name = name,
                 Avatar = avatar
             };
-            return SendRequestAsync<WebhookModel>(new RestRequest(POST, $"channels/{channelId:channel_id}/webhooks", requestContent, options));
+            return SendRequestAsync<WebhookModel>(CreateRequest(POST, $"channels/{channelId:channel_id}/webhooks", requestContent, options));
         }
 
         public Task<WebhookModel[]> GetChannelWebhooksAsync(ulong channelId, RestRequestOptions options)
-            => SendRequestAsync<WebhookModel[]>(new RestRequest(GET, $"channels/{channelId:channel_id}/webhooks", options));
+            => SendRequestAsync<WebhookModel[]>(CreateRequest(GET, $"channels/{channelId:channel_id}/webhooks", options));
 
         public Task<WebhookModel[]> GetGuildWebhooksAsync(ulong guildId, RestRequestOptions options)
-            => SendRequestAsync<WebhookModel[]>(new RestRequest(GET, $"guilds/{guildId:guild_id}/webhooks", options));
+            => SendRequestAsync<WebhookModel[]>(CreateRequest(GET, $"guilds/{guildId:guild_id}/webhooks", options));
 
         public Task<WebhookModel> GetWebhookAsync(ulong webhookId, RestRequestOptions options)
-            => SendRequestAsync<WebhookModel>(new RestRequest(GET, $"webhooks/{webhookId:webhook_id}", options));
+            => SendRequestAsync<WebhookModel>(CreateRequest(GET, $"webhooks/{webhookId:webhook_id}", options));
 
         public Task<WebhookModel> GetWebhookWithTokenAsync(ulong webhookId, string webhookToken, RestRequestOptions options)
-            => SendRequestAsync<WebhookModel>(new RestRequest(GET, $"webhooks/{webhookId:webhook_id}/{webhookToken}", options));
+            => SendRequestAsync<WebhookModel>(CreateRequest(GET, $"webhooks/{webhookId:webhook_id}/{webhookToken}", options));
 
         public Task<WebhookModel> ModifyWebhookAsync(ulong webhookId, ModifyWebhookProperties properties, RestRequestOptions options)
         {
@@ -916,7 +1001,7 @@ namespace Disqord.Rest
                     ? properties.ChannelId.Value.RawValue
                     : Optional<ulong>.Empty
             };
-            return SendRequestAsync<WebhookModel>(new RestRequest(PATCH, $"webhooks/{webhookId:webhook_id}", requestContent, options));
+            return SendRequestAsync<WebhookModel>(CreateRequest(PATCH, $"webhooks/{webhookId:webhook_id}", requestContent, options));
         }
 
         public Task<WebhookModel> ModifyWebhookWithTokenAsync(ulong webhookId, string webhookToken, ModifyWebhookProperties properties, RestRequestOptions options)
@@ -926,14 +1011,14 @@ namespace Disqord.Rest
                 Name = properties.Name,
                 Avatar = properties.Avatar
             };
-            return SendRequestAsync<WebhookModel>(new RestRequest(PATCH, $"webhooks/{webhookId:webhook_id}/{webhookToken}", requestContent, options));
+            return SendRequestAsync<WebhookModel>(CreateRequest(PATCH, $"webhooks/{webhookId:webhook_id}/{webhookToken}", requestContent, options));
         }
 
         public Task DeleteWebhookAsync(ulong webhookId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"webhooks/{webhookId:webhook_id}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"webhooks/{webhookId:webhook_id}", options));
 
         public Task DeleteWebhookWithTokenAsync(ulong webhookId, string webhookToken, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"webhooks/{webhookId:webhook_id}/{webhookToken}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"webhooks/{webhookId:webhook_id}/{webhookToken}", options));
 
         public Task<MessageModel> ExecuteWebhookAsync(ulong webhookId, string webhookToken,
             string content, bool isTTS, IEnumerable<LocalEmbed> embeds,
@@ -949,7 +1034,7 @@ namespace Disqord.Rest
                 TTS = isTTS,
                 Embeds = embeds?.Select(x => x.ToModel()).ToArray()
             };
-            return SendRequestAsync<MessageModel>(new RestRequest(POST, $"webhooks/{webhookId:webhook_id}/{webhookToken}", new Dictionary<string, object>
+            return SendRequestAsync<MessageModel>(CreateRequest(POST, $"webhooks/{webhookId:webhook_id}/{webhookToken}", new Dictionary<string, object>
             {
                 ["wait"] = wait
             }, requestContent, options));
@@ -974,7 +1059,7 @@ namespace Disqord.Rest
                 },
                 Attachment = attachment
             };
-            return SendRequestAsync<MessageModel>(new RestRequest(POST, $"webhooks/{webhookId:webhook_id}/{webhookToken}", new Dictionary<string, object>
+            return SendRequestAsync<MessageModel>(CreateRequest(POST, $"webhooks/{webhookId:webhook_id}/{webhookToken}", new Dictionary<string, object>
             {
                 ["wait"] = wait
             }, requestContent, options));
@@ -999,14 +1084,14 @@ namespace Disqord.Rest
                 },
                 Attachments = attachments.ToArray()
             };
-            return SendRequestAsync<MessageModel>(new RestRequest(POST, $"webhooks/{webhookId:webhook_id}/{webhookToken}", new Dictionary<string, object>
+            return SendRequestAsync<MessageModel>(CreateRequest(POST, $"webhooks/{webhookId:webhook_id}/{webhookToken}", new Dictionary<string, object>
             {
                 ["wait"] = wait
             }, requestContent, options));
         }
 
         public Task<ApplicationModel> GetCurrentApplicationInformationAsync(RestRequestOptions options)
-            => SendRequestAsync<ApplicationModel>(new RestRequest(GET, $"oauth2/applications/@me", options));
+            => SendRequestAsync<ApplicationModel>(CreateRequest(GET, $"oauth2/applications/@me", options));
 
         public Task CreateRelationshipAsync(ulong userId, RelationshipType? type, RestRequestOptions options)
         {
@@ -1015,11 +1100,11 @@ namespace Disqord.Rest
                 Type = type
             };
 
-            return SendRequestAsync(new RestRequest(PUT, $"users/@me/relationships/{userId}", requestContent, options));
+            return SendRequestAsync(CreateRequest(PUT, $"users/@me/relationships/{userId}", requestContent, options));
         }
 
         public Task DeleteRelationshipAsync(ulong userId, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(DELETE, $"users/@me/relationships/{userId}", options));
+            => SendRequestAsync(CreateRequest(DELETE, $"users/@me/relationships/{userId}", options));
 
         public Task SendFriendRequestAsync(string name, string discriminator, RestRequestOptions options)
         {
@@ -1029,17 +1114,17 @@ namespace Disqord.Rest
                 Discriminator = discriminator
             };
 
-            return SendRequestAsync(new RestRequest(POST, $"users/@me/relationships", requestContent, options));
+            return SendRequestAsync(CreateRequest(POST, $"users/@me/relationships", requestContent, options));
         }
 
         public Task<ProfileModel> GetUserProfileAsync(ulong userId, RestRequestOptions options)
-            => SendRequestAsync<ProfileModel>(new RestRequest(GET, $"users/{userId}/profile", options));
+            => SendRequestAsync<ProfileModel>(CreateRequest(GET, $"users/{userId}/profile", options));
 
         public Task<RelationshipModel[]> GetRelationshipsAsync(RestRequestOptions options)
-            => SendRequestAsync<RelationshipModel[]>(new RestRequest(GET, $"users/@me/relationships", options));
+            => SendRequestAsync<RelationshipModel[]>(CreateRequest(GET, $"users/@me/relationships", options));
 
         public Task<UserModel[]> GetMutualFriendsAsync(ulong userId, RestRequestOptions options)
-            => SendRequestAsync<UserModel[]>(new RestRequest(GET, $"users/{userId}/relationships", options));
+            => SendRequestAsync<UserModel[]>(CreateRequest(GET, $"users/{userId}/relationships", options));
 
         public Task CreateNoteAsync(ulong userId, string note, RestRequestOptions options)
         {
@@ -1048,7 +1133,7 @@ namespace Disqord.Rest
                 Note = note
             };
 
-            return SendRequestAsync(new RestRequest(PUT, $"users/@me/notes/{userId}", requestContent, options));
+            return SendRequestAsync(CreateRequest(PUT, $"users/@me/notes/{userId}", requestContent, options));
         }
 
         public async Task<string> AckMessageAsync(ulong channelId, ulong messageId, string token, RestRequestOptions options)
@@ -1057,15 +1142,15 @@ namespace Disqord.Rest
             {
                 Token = token
             };
-            var model = await SendRequestAsync<AckMessageContent>(new RestRequest(POST, $"channels/{channelId:channel_id}/messages/{messageId}/ack", requestContent, options));
+            var model = await SendRequestAsync<AckMessageContent>(CreateRequest(POST, $"channels/{channelId:channel_id}/messages/{messageId}/ack", requestContent, options)).ConfigureAwait(false);
             return model.Token;
         }
 
         public Task AcceptInviteAsync(string code, RestRequestOptions options)
-            => SendRequestAsync(new RestRequest(POST, $"invites/{code}", options));
+            => SendRequestAsync(CreateRequest(POST, $"invites/{code}", options));
 
         public Task<UserSettingsModel> GetUserSettingsAsync(RestRequestOptions options)
-            => SendRequestAsync<UserSettingsModel>(new RestRequest(GET, $"users/@me/settings", options));
+            => SendRequestAsync<UserSettingsModel>(CreateRequest(GET, $"users/@me/settings", options));
 
         public Task<UserSettingsModel> ModifyUserSettingsAsync(ModifyUserSettingsProperties properties, RestRequestOptions options)
         {
@@ -1103,8 +1188,44 @@ namespace Disqord.Rest
                     ? (long) properties.AfkTimeout.Value.TotalSeconds
                     : Optional<long>.Empty
             };
-            return SendRequestAsync<UserSettingsModel>(new RestRequest(PATCH, $"users/@me/settings", new JsonObjectContent(model), options));
+            return SendRequestAsync<UserSettingsModel>(CreateRequest(PATCH, $"users/@me/settings", new JsonObjectContent(model), options));
         }
+
+        public Task<LoginModel> LoginAsync(string email, string password, RestRequestOptions options)
+        {
+            var content = new LoginContent
+            {
+                Email = email,
+                Password = password
+            };
+
+            return SendRequestAsync<LoginModel>(CreateRequest(POST, $"auth/login", content, options));
+        }
+
+        public Task LogoutAsync(RestRequestOptions options)
+        {
+            var content = new LogoutContent
+            {
+                Provider = null,
+                VoipProvider = null
+            };
+
+            return SendRequestAsync(CreateRequest(POST, $"auth/logout", content, options));
+        }
+
+        public Task<LoginModel> TotpAsync(string ticket, string mfaCode, RestRequestOptions options)
+        {
+            var content = new TotpContent
+            {
+                Ticket = ticket,
+                Code = mfaCode
+            };
+
+            return SendRequestAsync<LoginModel>(CreateRequest(POST, $"auth/mfa/totp", content, options));
+        }
+
+        public Task<PreviewModel> GetGuildPreviewAsync(ulong guildId, RestRequestOptions options)
+            => SendRequestAsync<PreviewModel>(CreateRequest(GET, $"guilds/{guildId:guild_id}/preview", options));
 
         public void Log(LogMessageSeverity severity, string message, Exception exception = null)
             => Logger.Log(this, new MessageLoggedEventArgs("Rest", severity, message, exception));

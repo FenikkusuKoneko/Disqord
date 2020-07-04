@@ -1,6 +1,5 @@
 ﻿using System.Collections.Generic;
-using System.Collections.Immutable;
-using System.Linq;
+using Disqord.Collections;
 using Disqord.Models;
 
 namespace Disqord.Rest
@@ -11,7 +10,7 @@ namespace Disqord.Rest
 
         public Snowflake GuildId { get; }
 
-        public RestDownloadable<RestGuild> Guild { get; }
+        public RestFetchable<RestGuild> Guild { get; }
 
         public IReadOnlyList<RestOverwrite> Overwrites { get; private set; }
 
@@ -20,7 +19,8 @@ namespace Disqord.Rest
         internal RestGuildChannel(RestDiscordClient client, ChannelModel model) : base(client, model)
         {
             GuildId = model.GuildId.Value;
-            Guild = new RestDownloadable<RestGuild>(options => Client.GetGuildAsync(GuildId, options));
+            Guild = RestFetchable.Create(this, (@this, options) =>
+                @this.Client.GetGuildAsync(@this.GuildId, options));
         }
 
         internal override void Update(ChannelModel model)
@@ -29,12 +29,12 @@ namespace Disqord.Rest
                 Position = model.Position.Value;
 
             if (model.PermissionOverwrites.HasValue)
-                Overwrites = model.PermissionOverwrites.Value.Select(x =>
+                Overwrites = model.PermissionOverwrites.Value.ToReadOnlyList(this, (x, @this) =>
                 {
-                    var overwrite = new RestOverwrite(Client, Id, x);
-                    overwrite.Channel.SetValue(this);
+                    var overwrite = new RestOverwrite(@this.Client, @this.Id, x);
+                    overwrite.Channel.Value = @this;
                     return overwrite;
-                }).ToImmutableArray();
+                });
 
             base.Update(model);
         }
@@ -45,6 +45,7 @@ namespace Disqord.Rest
             {
                 case ChannelType.Text:
                 case ChannelType.News:
+                case ChannelType.Store:
                     return new RestTextChannel(client, model);
 
                 case ChannelType.Voice:
@@ -54,7 +55,7 @@ namespace Disqord.Rest
                     return new RestCategoryChannel(client, model);
 
                 default:
-                    return null;
+                    return new RestUnknownGuildChannel(client, model);
             }
         }
     }

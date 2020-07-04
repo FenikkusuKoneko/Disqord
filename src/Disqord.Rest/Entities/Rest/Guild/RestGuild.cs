@@ -1,10 +1,7 @@
 ﻿using System.Collections.Generic;
-using System.Collections.Immutable;
 using System.Globalization;
-using System.Linq;
 using Disqord.Collections;
 using Disqord.Models;
-using Qommon.Collections;
 
 namespace Disqord.Rest
 {
@@ -15,6 +12,8 @@ namespace Disqord.Rest
         public string IconHash { get; private set; }
 
         public string SplashHash { get; private set; }
+
+        public string DiscoverySplashHash { get; private set; }
 
         public Snowflake OwnerId { get; private set; }
 
@@ -85,6 +84,9 @@ namespace Disqord.Rest
             if (model.Splash.HasValue)
                 SplashHash = model.Splash.Value;
 
+            if (model.DiscoverySplash.HasValue)
+                DiscoverySplashHash = model.DiscoverySplash.Value;
+
             if (model.OwnerId.HasValue)
                 OwnerId = model.OwnerId.Value;
 
@@ -113,23 +115,23 @@ namespace Disqord.Rest
                 ContentFilterLevel = model.ExplicitContentFilter.Value;
 
             if (model.Roles.HasValue)
-                Roles = new ReadOnlyDictionary<Snowflake, RestRole>(model.Roles.Value.ToDictionary(x => new Snowflake(x.Id), x =>
+                Roles = model.Roles.Value.ToReadOnlyDictionary((x, _) => new Snowflake(x.Id), (x, @this) =>
                 {
-                    var role = new RestRole(Client, Id, x);
-                    role.Guild.SetValue(this);
+                    var role = new RestRole(@this.Client, @this.Id, x);
+                    role.Guild.Value = @this;
                     return role;
-                }));
+                }, this);
 
             if (model.Emojis.HasValue)
-                Emojis = model.Emojis.Value.ToDictionary(x => new Snowflake(x.Id.Value), x =>
+                Emojis = model.Emojis.Value.ToReadOnlyDictionary((x, _) => new Snowflake(x.Id.Value), (x, @this) =>
                 {
-                    var emoji = new RestGuildEmoji(Client, Id, x);
-                    emoji.Guild.SetValue(this);
+                    var emoji = new RestGuildEmoji(@this.Client, @this.Id, x);
+                    emoji.Guild.Value = @this;
                     return emoji;
-                });
+                }, this);
 
             if (model.Features.HasValue)
-                Features = model.Features.Value.ToImmutableArray();
+                Features = model.Features.Value.ReadOnly();
 
             if (model.MfaLevel.HasValue)
                 MfaLevel = model.MfaLevel.Value;
@@ -172,13 +174,16 @@ namespace Disqord.Rest
         }
 
         public string GetIconUrl(ImageFormat format = default, int size = 2048)
-            => Discord.GetGuildIconUrl(Id, IconHash, format, size);
+            => Discord.Cdn.GetGuildIconUrl(Id, IconHash, format, size);
 
         public string GetSplashUrl(int size = 2048)
-            => Discord.GetGuildSplashUrl(Id, SplashHash, ImageFormat.Png, 2048);
+            => Discord.Cdn.GetGuildSplashUrl(Id, SplashHash, ImageFormat.Png, size);
+
+        public string GetDiscoverySplashUrl(int size = 2048)
+            => Discord.Cdn.GetGuildDiscoverySplashUrl(Id, DiscoverySplashHash, ImageFormat.Png, size);
 
         public string GetBannerUrl(int size = 2048)
-            => Discord.GetGuildBannerUrl(Id, SplashHash, ImageFormat.Png, 2048);
+            => Discord.Cdn.GetGuildBannerUrl(Id, BannerHash, ImageFormat.Png, size);
 
         public override string ToString()
             => Name;

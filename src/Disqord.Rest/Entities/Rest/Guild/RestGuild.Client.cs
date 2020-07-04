@@ -17,16 +17,16 @@ namespace Disqord.Rest
         {
             var webhooks = await Client.GetGuildWebhooksAsync(Id, options).ConfigureAwait(false);
             for (var i = 0; i < webhooks.Count; i++)
-                webhooks[i].Guild.SetValue(this);
+                webhooks[i].Guild.Value = this;
 
             return webhooks;
         }
 
-        public RestRequestEnumerable<RestAuditLog> GetAuditLogsEnumerable(int limit = 100, Snowflake? userId = null, Snowflake? startFromId = null)
-            => Client.GetAuditLogsEnumerable(Id, limit, userId, startFromId);
+        public RestRequestEnumerable<RestAuditLog> GetAuditLogsEnumerable(int limit = 100, Snowflake? userId = null, Snowflake? startFromId = null, RestRequestOptions options = null)
+            => Client.GetAuditLogsEnumerable(Id, limit, userId, startFromId, options);
 
-        public RestRequestEnumerable<T> GetAuditLogsEnumerable<T>(int limit = 100, Snowflake? userId = null, Snowflake? startFromId = null) where T : RestAuditLog
-            => Client.GetAuditLogsEnumerable<T>(Id, limit, userId, startFromId);
+        public RestRequestEnumerable<T> GetAuditLogsEnumerable<T>(int limit = 100, Snowflake? userId = null, Snowflake? startFromId = null, RestRequestOptions options = null) where T : RestAuditLog
+            => Client.GetAuditLogsEnumerable<T>(Id, limit, userId, startFromId, options);
 
         public Task<IReadOnlyList<RestAuditLog>> GetAuditLogsAsync(int limit = 100, Snowflake? userId = null, Snowflake? startFromId = null, RestRequestOptions options = null)
             => Client.GetAuditLogsAsync(Id, limit, userId, startFromId, options);
@@ -44,7 +44,7 @@ namespace Disqord.Rest
         {
             var channels = await Client.GetChannelsAsync(Id, options).ConfigureAwait(false);
             for (var i = 0; i < channels.Count; i++)
-                channels[i].Guild.SetValue(this);
+                channels[i].Guild.Value = this;
 
             return channels;
         }
@@ -64,18 +64,18 @@ namespace Disqord.Rest
         public async Task<RestMember> GetMemberAsync(Snowflake memberId, RestRequestOptions options = null)
         {
             var member = await Client.GetMemberAsync(Id, memberId, options).ConfigureAwait(false);
-            member.Guild.SetValue(this);
+            member.Guild.Value = this;
             return member;
         }
 
-        public RestRequestEnumerable<RestMember> GetMembersEnumerable(int limit, Snowflake? startFromId = null)
-            => Client.GetMembersEnumerable(Id, limit, startFromId);
+        public RestRequestEnumerable<RestMember> GetMembersEnumerable(int limit, Snowflake? startFromId = null, RestRequestOptions options = null)
+            => Client.GetMembersEnumerable(Id, limit, startFromId, options);
 
         public async Task<IReadOnlyList<RestMember>> GetMembersAsync(int limit = 1000, Snowflake? startFromId = null, RestRequestOptions options = null)
         {
             var members = await Client.GetMembersAsync(Id, limit, startFromId, options).ConfigureAwait(false);
             for (var i = 0; i < members.Count; i++)
-                members[i].Guild.SetValue(this);
+                members[i].Guild.Value = this;
 
             return members;
         }
@@ -99,7 +99,7 @@ namespace Disqord.Rest
         {
             var bans = await Client.GetBansAsync(Id, options).ConfigureAwait(false);
             for (var i = 0; i < bans.Count; i++)
-                bans[i].Guild.SetValue(this);
+                bans[i].Guild.Value = this;
 
             return bans;
         }
@@ -107,7 +107,7 @@ namespace Disqord.Rest
         public async Task<RestBan> GetBanAsync(Snowflake userId, RestRequestOptions options = null)
         {
             var ban = await Client.GetBanAsync(Id, userId, options).ConfigureAwait(false);
-            ban.Guild.SetValue(this);
+            ban.Guild.Value = this;
             return ban;
         }
 
@@ -121,15 +121,15 @@ namespace Disqord.Rest
         {
             var roles = await Client.GetRolesAsync(Id, options).ConfigureAwait(false);
             for (var i = 0; i < roles.Count; i++)
-                roles[i].Guild.SetValue(this);
+                roles[i].Guild.Value = this;
 
             return roles;
         }
 
         public async Task<RestRole> CreateRoleAsync(Action<CreateRoleProperties> action = null, RestRequestOptions options = null)
         {
-            var role = await Client.CreateRoleAsync(Id, action, options);
-            role.Guild.SetValue(this);
+            var role = await Client.CreateRoleAsync(Id, action, options).ConfigureAwait(false);
+            role.Guild.Value = this;
             return role;
         }
 
@@ -137,7 +137,7 @@ namespace Disqord.Rest
         {
             var roles = await Client.ReorderRolesAsync(Id, positions, options).ConfigureAwait(false);
             for (var i = 0; i < roles.Count; i++)
-                roles[i].Guild.SetValue(this);
+                roles[i].Guild.Value = this;
 
             return roles;
         }
@@ -145,7 +145,7 @@ namespace Disqord.Rest
         public async Task<RestRole> ModifyRoleAsync(Snowflake roleId, Action<ModifyRoleProperties> action, RestRequestOptions options = null)
         {
             var role = await Client.ModifyRoleAsync(Id, roleId, action, options).ConfigureAwait(false);
-            role.Guild.SetValue(this);
+            role.Guild.Value = this;
             return role;
         }
 
@@ -162,7 +162,7 @@ namespace Disqord.Rest
         {
             var regions = await Client.GetVoiceRegionsAsync(Id, options).ConfigureAwait(false);
             for (var i = 0; i < regions.Count; i++)
-                regions[i].Guild.SetValue(this);
+                regions[i].Guild.Value = this;
 
             return regions;
         }
@@ -173,14 +173,14 @@ namespace Disqord.Rest
         public async Task<RestWidget> GetWidgetAsync(RestRequestOptions options = null)
         {
             var widget = await Client.GetWidgetAsync(Id, options).ConfigureAwait(false);
-            widget.Guild.SetValue(this);
+            widget.Guild.Value = this;
             return widget;
         }
 
         public async Task<RestWidget> ModifyWidgetAsync(Action<ModifyWidgetProperties> action, RestRequestOptions options = null)
         {
             var widget = await Client.ModifyWidgetAsync(Id, action, options).ConfigureAwait(false);
-            widget.Guild.SetValue(this);
+            widget.Guild.Value = this;
             return widget;
         }
 
@@ -194,7 +194,7 @@ namespace Disqord.Rest
         {
             var emojis = await Client.GetGuildEmojisAsync(Id, options).ConfigureAwait(false);
             for (var i = 0; i < emojis.Count; i++)
-                emojis[i].Guild.SetValue(this);
+                emojis[i].Guild.Value = this;
 
             return emojis;
         }
@@ -202,25 +202,32 @@ namespace Disqord.Rest
         public async Task<RestGuildEmoji> GetEmojiAsync(Snowflake emojiId, RestRequestOptions options = null)
         {
             var emoji = await Client.GetGuildEmojiAsync(Id, emojiId, options).ConfigureAwait(false);
-            emoji.Guild.SetValue(this);
+            emoji.Guild.Value = this;
             return emoji;
         }
 
         public async Task<RestGuildEmoji> CreateEmojiAsync(Stream image, string name, IEnumerable<Snowflake> roleIds = null, RestRequestOptions options = null)
         {
             var emoji = await Client.CreateGuildEmojiAsync(Id, image, name, roleIds, options).ConfigureAwait(false);
-            emoji.Guild.SetValue(this);
+            emoji.Guild.Value = this;
             return emoji;
         }
 
         public async Task<RestGuildEmoji> ModifyEmojiAsync(Snowflake emojiId, Action<ModifyGuildEmojiProperties> action, RestRequestOptions options = null)
         {
             var emoji = await Client.ModifyGuildEmojiAsync(Id, emojiId, action, options).ConfigureAwait(false);
-            emoji.Guild.SetValue(this);
+            emoji.Guild.Value = this;
             return emoji;
         }
 
         public Task DeleteEmojiAsync(Snowflake emojiId, RestRequestOptions options = null)
             => Client.DeleteGuildEmojiAsync(Id, emojiId, options);
+
+        public async Task<RestPreview> GetPreviewAsync(RestRequestOptions options = null)
+        {
+            var preview = await Client.GetPreviewAsync(Id, options).ConfigureAwait(false);
+            preview.Guild.Value = this;
+            return preview;
+        }
     }
 }

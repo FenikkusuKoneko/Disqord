@@ -1,14 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Collections.Immutable;
+﻿using System.Collections.Generic;
 using System.Linq;
-using System.Threading.Tasks;
+using Disqord.Collections;
 using Disqord.Models;
-using Disqord.Rest;
 
 namespace Disqord
 {
-    public sealed class CachedGuildEmoji : CachedSnowflakeEntity, IGuildEmoji
+    public sealed partial class CachedGuildEmoji : CachedSnowflakeEntity, IGuildEmoji
     {
         public CachedGuild Guild { get; }
 
@@ -21,6 +18,8 @@ namespace Disqord
         public bool IsManaged { get; }
 
         public bool IsAnimated { get; }
+
+        public bool IsAvailable { get; private set; }
 
         public string ReactionFormat => Discord.ToReactionFormat(this);
 
@@ -43,11 +42,12 @@ namespace Disqord
         internal void Update(EmojiModel model)
         {
             Name = model.Name;
-            RoleIds = model.Roles.Select(x => new Snowflake(x)).ToImmutableArray();
+            RoleIds = model.Roles.ToSnowflakeList();
+            IsAvailable = model.Available;
         }
 
         public string GetUrl(int size = 2048)
-            => Discord.GetCustomEmojiUrl(Id, IsAnimated, size);
+            => Discord.Cdn.GetCustomEmojiUrl(Id, IsAnimated, size);
 
         public bool Equals(IEmoji other)
             => Discord.Comparers.Emoji.Equals(this, other);
@@ -57,18 +57,5 @@ namespace Disqord
 
         public override int GetHashCode()
             => Discord.Comparers.Emoji.GetHashCode(this);
-
-        public Task DeleteAsync(RestRequestOptions options = null)
-            => Client.DeleteGuildEmojiAsync(Guild.Id, Id, options);
-
-        public async Task ModifyAsync(Action<ModifyGuildEmojiProperties> action, RestRequestOptions options = null)
-        {
-            if (action == null)
-                throw new ArgumentNullException(nameof(action));
-
-            var properties = new ModifyGuildEmojiProperties();
-            action(properties);
-            Update(await Client.RestClient.ApiClient.ModifyGuildEmojiAsync(Guild.Id, Id, properties, options).ConfigureAwait(false));
-        }
     }
 }

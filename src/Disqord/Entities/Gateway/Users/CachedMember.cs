@@ -2,10 +2,8 @@
 using System.Collections.Generic;
 using System.Linq;
 using Disqord.Collections;
-using Disqord.Logging;
 using Disqord.Models;
 using Disqord.Models.Dispatches;
-using Qommon.Collections;
 
 namespace Disqord
 {
@@ -21,11 +19,12 @@ namespace Disqord
 
         public string Nick { get; private set; }
 
-        public IReadOnlyDictionary<Snowflake, CachedRole> Roles { get; private set; }
+        public IReadOnlyDictionary<Snowflake, CachedRole> Roles => _roles.ReadOnly();
+        private RoleCollection _roles;
 
         public DateTimeOffset JoinedAt { get; }
 
-        public GuildPermissions Permissions => Discord.Permissions.CalculatePermissions(Guild, this, Roles.Values);
+        public GuildPermissions Permissions => Discord.Permissions.CalculatePermissions(Guild, this, _roles.Values);
 
         public bool IsMuted { get; private set; }
 
@@ -44,16 +43,16 @@ namespace Disqord
 
         public int Hierarchy => Id == Guild.OwnerId
             ? int.MaxValue
-            : Roles.Values.Max(x => x.Position);
+            : _roles.Values.Max(x => x.Position);
 
         public Color? Color
         {
             get
             {
-                if (Roles.Count == 1)
+                if (_roles.Count == 1)
                     return null;
 
-                var role = Roles.Values.OrderByDescending(x => x.Position).FirstOrDefault(x => x.Color != default);
+                var role = _roles.Values.OrderByDescending(x => x.Position).FirstOrDefault(x => x.Color != null);
                 return role?.Color;
             }
         }
@@ -75,17 +74,13 @@ namespace Disqord
             }
         }
 
-        private LockedDictionary<Snowflake, CachedRole> _roles;
-
         internal override CachedSharedUser SharedUser { get; }
 
         Snowflake IMember.GuildId => Guild.Id;
-        IReadOnlyCollection<Snowflake> IMember.RoleIds => new ReadOnlyCollection<Snowflake>(_roles.Keys);
+        IReadOnlyCollection<Snowflake> IMember.RoleIds => new ReadOnlyCollection<Snowflake>(_roles.Keys as ICollection<Snowflake>);
 
         internal CachedMember(CachedSharedUser user, CachedGuild guild, MemberModel model) : base(user)
         {
-            _roles = new LockedDictionary<Snowflake, CachedRole>(model.Roles.Value.Length);
-            Roles = new ReadOnlyDictionary<Snowflake, CachedRole>(_roles);
             SharedUser = user;
             Guild = guild;
             JoinedAt = model.JoinedAt;
@@ -100,18 +95,10 @@ namespace Disqord
 
         internal void Update(ulong[] roles)
         {
-            _roles.Clear();
-            _roles[Guild.Id] = Guild.Roles[Guild.Id];
-            for (var i = 0; i < roles.Length; i++)
-            {
-                var roleId = roles[i];
-                if (!Guild.Roles.TryGetValue(roleId, out var role))
-                {
-                    Client.Log(LogMessageSeverity.Warning, $"Guild has no role the member has. Id: {roleId} {Guild.Name}.");
-                    continue;
-                }
-                _roles[roleId] = role;
-            }
+            if (_roles == null)
+                _roles = new RoleCollection(Guild, roles);
+            else
+                _roles.Update(roles);
         }
 
         internal void Update(MemberModel model)
@@ -178,22 +165,23 @@ namespace Disqord
             {
                 // Users cannot have different statuses for different guilds
                 // due to the lack of sharding support.
-                _presence = new Presence(true, model);
+                _presence = model.Status != UserStatus.Offline
+                    ? new Presence(true, model)
+                    : null;
             }
         }
 
         internal new CachedMember Clone()
         {
-            var member = (CachedMember) MemberwiseClone();
-
-            // TODO: cleanup
-            member._roles = new LockedDictionary<Snowflake, CachedRole>(_roles);
-            member.Roles = new ReadOnlyDictionary<Snowflake, CachedRole>(member._roles);
-
-            return member;
+            var clone = (CachedMember) MemberwiseClone();
+            clone._roles = new RoleCollection(_roles);
+            return clone;
         }
 
         public ChannelPermissions GetPermissionsFor(IGuildChannel channel)
-            => Discord.Permissions.CalculatePermissions(Guild, channel, this, Roles.Values);
+            => Discord.Permissions.CalculatePermissions(Guild, channel, this, _roles.Values);
+
+        public CachedRole GetRole(Snowflake roleId)
+            => _roles.GetValueOrDefault(roleId);
     }
 }

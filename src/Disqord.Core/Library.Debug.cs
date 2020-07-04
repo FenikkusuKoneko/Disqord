@@ -13,6 +13,10 @@ namespace Disqord
 
             public static bool DumpJson;
 
+            public static bool TimedWebSocketConnect;
+
+            public static bool MobileIndicator;
+
             public static TextWriter DumpWriter
             {
                 get => _dumpWriter;

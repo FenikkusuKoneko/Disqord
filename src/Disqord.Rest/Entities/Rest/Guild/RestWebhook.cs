@@ -8,13 +8,13 @@ namespace Disqord.Rest
     {
         public Snowflake GuildId { get; }
 
-        public RestDownloadable<RestGuild> Guild { get; }
+        public RestFetchable<RestGuild> Guild { get; }
 
         public WebhookType Type { get; }
 
         public Snowflake ChannelId { get; private set; }
 
-        public RestDownloadable<RestTextChannel> Channel { get; }
+        public RestFetchable<RestTextChannel> Channel { get; }
 
         public RestUser Owner { get; private set; }
 
@@ -29,8 +29,10 @@ namespace Disqord.Rest
             Type = model.Type;
             Token = model.Token;
             GuildId = model.GuildId;
-            Guild = new RestDownloadable<RestGuild>(options => Client.GetGuildAsync(GuildId, options));
-            Channel = new RestDownloadable<RestTextChannel>(async options => await client.GetChannelAsync(ChannelId, options).ConfigureAwait(false) as RestTextChannel);
+            Guild = RestFetchable.Create(this, (@this, options) =>
+                @this.Client.GetGuildAsync(@this.GuildId, options));
+            Channel = RestFetchable.Create(this, (@this, options) =>
+                @this.Client.GetChannelAsync<RestTextChannel>(@this.ChannelId, options));
         }
 
         internal void Update(WebhookModel model)
@@ -38,29 +40,46 @@ namespace Disqord.Rest
             ChannelId = model.ChannelId;
 
             if (model.User != null)
-                Owner = new RestUser(Client, model.User);
+            {
+                if (Owner == null)
+                    Owner = new RestUser(Client, model.User);
+                else
+                    Owner.Update(model.User);
+            }
 
             Name = model.Name;
             AvatarHash = model.Avatar;
         }
 
-        public Task DeleteAsync(RestRequestOptions options = null)
-            => Client.DeleteWebhookAsync(Id, options);
-
-        public Task DeleteWithTokenAsync(RestRequestOptions options = null)
-            => Client.DeleteWebhookWithTokenAsync(Id, Token, options);
-
         public async Task ModifyAsync(Action<ModifyWebhookProperties> action, RestRequestOptions options = null)
         {
+            if (!Client.HasAuthorization)
+                throw new InvalidOperationException(
+                    "To modify a webhook without using its token the client must be authorized. " +
+                    "Did you mean to call ModifyWithTokenAsync instead?");
+
             var model = await Client.InternalModifyWebhookAsync(Id, action, options).ConfigureAwait(false);
             Update(model);
         }
 
         public async Task ModifyWithTokenAsync(Action<ModifyWebhookProperties> action, RestRequestOptions options = null)
         {
-            var model = await Client.InternalModifyWebhookWithTokenAsync(Id, Token, action, options).ConfigureAwait(false);
+            var model = await Client.InternalModifyWebhookAsync(Id, Token, action, options).ConfigureAwait(false);
             Update(model);
         }
+
+        public Task DeleteAsync(RestRequestOptions options = null)
+        {
+            if (!Client.HasAuthorization)
+                throw new InvalidOperationException(
+                    "To delete a webhook without using its token the client must be authorized. " +
+                    "Did you mean to call DeleteWithTokenAsync instead?");
+
+            return Client.DeleteWebhookAsync(Id, options);
+        }
+
+        public Task DeleteWithTokenAsync(RestRequestOptions options = null)
+            => Client.DeleteWebhookAsync(Id, Token, options);
 
         public string GetAvatarUrl(ImageFormat format = default, int size = 2048)
             => Discord.Internal.GetAvatarUrl(this, format, size);
