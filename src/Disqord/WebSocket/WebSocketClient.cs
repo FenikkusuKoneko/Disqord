@@ -70,30 +70,17 @@ namespace Disqord.WebSocket
             _closeStatus = null;
             _closeDescription = null;
 
-            if (Library.Debug.TimedWebSocketConnect)
-            {
-                using (var cts = new CancellationTokenSource())
-                using (var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, token))
-                {
-                    // I don't trust any of these at this point
-                    _ws?.Dispose();
-                    _ws = new ClientWebSocket();
-                    _ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(10);
-                    var connectTask = Task.Run(() => _ws.ConnectAsync(url, linkedCts.Token), linkedCts.Token);
-                    var delayTask = Task.Delay(10_000, linkedCts.Token);
-                    var task = await Task.WhenAny(connectTask, delayTask).ConfigureAwait(false);
-                    linkedCts.Cancel();
-
-                    if (task == delayTask)
-                        throw new TaskCanceledException("Timed out waiting for ClientWebSocket's ConnectAsync.");
-                }
-            }
-            else
+            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+            using (var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, token))
             {
                 _ws?.Dispose();
                 _ws = new ClientWebSocket();
                 _ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(10);
                 await _ws.ConnectAsync(url, token).ConfigureAwait(false);
+                _ws.Options.Proxy = null;
+                _ws.Options.KeepAliveInterval = TimeSpan.Zero;
+
+                await _ws.ConnectAsync(url, linkedCts.Token).ConfigureAwait(false);
             }
 
             _receiveTask = Task.Run(RunReceiveAsync);
