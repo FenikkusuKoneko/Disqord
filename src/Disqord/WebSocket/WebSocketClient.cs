@@ -75,8 +75,6 @@ namespace Disqord.WebSocket
             {
                 _ws?.Dispose();
                 _ws = new ClientWebSocket();
-                _ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(10);
-                await _ws.ConnectAsync(url, token).ConfigureAwait(false);
                 _ws.Options.Proxy = null;
                 _ws.Options.KeepAliveInterval = TimeSpan.Zero;
 
