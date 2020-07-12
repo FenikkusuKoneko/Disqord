@@ -45,10 +45,10 @@ namespace Disqord
 
             if (model.Timestamps != null)
             {
-                if (model.Timestamps.Start != null)
+                if (model.Timestamps.Start != null && model.Timestamps.Start.Value > TimeSpan.MinValue.TotalMilliseconds)
                     StartedAt = DateTimeOffset.FromUnixTimeMilliseconds(model.Timestamps.Start.Value);
 
-                if (model.Timestamps.End != null)
+                if (model.Timestamps.End != null && model.Timestamps.End.Value < TimeSpan.MaxValue.TotalMilliseconds)
                     EndsAt = DateTimeOffset.FromUnixTimeMilliseconds(model.Timestamps.End.Value);
             }
 
