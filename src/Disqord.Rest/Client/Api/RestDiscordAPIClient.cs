@@ -112,10 +112,11 @@ namespace Disqord.Rest
         private IJsonSerializer GetDefaultSerializer()
             => NewtonsoftJsonSerializer.Instance;
 
-        private async Task EnqueueRequestAsync(RestRequest request)
+        private Task EnqueueRequestAsync(RestRequest request)
         {
             request.Initialise(Serializer);
             _rateLimiter.EnqueueRequest(request);
+            return Task.CompletedTask;
         }
 
         internal async Task<RateLimit> HandleRequestAsync(RestRequest request)

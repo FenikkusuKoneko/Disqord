@@ -14,7 +14,7 @@ namespace Disqord.Rest
 
         /// <summary>
         ///     Performs a user account login using the provided <paramref name="email"/> and <paramref name="password"/>.
-        ///     This method can only be used with a <see cref="RestDiscordClient"/> that was created using <see cref="CreateWithoutAuthorization(ILogger, IJsonSerializer)"/>.
+        ///     This method can only be used with a <see cref="RestDiscordClient"/> that was created using <see cref="CreateWithoutAuthorization(RestDiscordClientConfiguration)"/>.
         ///     If MFA is enabled, you must specify the <see cref="RestRequestOptions.MfaCode"/>.
         ///     This method does not support captcha.
         /// </summary>

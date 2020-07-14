@@ -259,8 +259,8 @@ namespace Disqord.WebSocket
 
             _isDisposed = true;
             DisposeTokens();
-            _compressedStream.Dispose();
-            _deflateStream.Dispose();
+            await _compressedStream.DisposeAsync();
+            await _deflateStream.DisposeAsync();
             _ws?.Dispose();
         }
     }
