@@ -31,6 +31,7 @@ namespace Disqord.Rest
             GuildId = model.GuildId;
             Guild = RestFetchable.Create(this, (@this, options) =>
                 @this.Client.GetGuildAsync(@this.GuildId, options));
+            ChannelId = model.ChannelId;
             Channel = RestFetchable.Create(this, (@this, options) =>
                 @this.Client.GetChannelAsync<RestTextChannel>(@this.ChannelId, options));
         }
